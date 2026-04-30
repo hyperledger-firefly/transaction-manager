@@ -28,7 +28,7 @@ type testBlockConsumer struct {
 	c chan *ffcapi.BlockHashEvent
 }
 
-func (tbc *testBlockConsumer) NewBlockHashes() chan<- *ffcapi.BlockHashEvent {
+func (tbc *testBlockConsumer) GetReceiveChannel() chan<- *ffcapi.BlockHashEvent {
 	return tbc.c
 }
 

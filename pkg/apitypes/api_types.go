@@ -437,8 +437,14 @@ type ConfirmationsNotification struct {
 	// NewFork is true when NewConfirmations is a complete list of confirmations.
 	// Otherwise, Confirmations is an additive delta on top of a previous list of confirmations.
 	NewFork bool
-	// Confirmations is the list of confirmations being notified - assured to be non-nil, but might be empty.
+	// Confirmations is the list of confirmations being notified - assured to be non-nil.
+	// The list will only be populated if chainTrackingMode is set to full.
 	Confirmations []*Confirmation
+	// CurrentConfirmationCount is the actual number of confirmations for the transaction
+	CurrentConfirmationCount uint64 `json:"currentConfirmationCount"`
+
+	// TargetConfirmationCount is the target number of confirmations to confirm the transaction
+	TargetConfirmationCount uint64 `json:"targetConfirmationCount"`
 }
 
 type Confirmation struct {

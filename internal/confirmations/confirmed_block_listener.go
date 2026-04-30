@@ -57,7 +57,7 @@ type confirmedBlockListener struct {
 	dispatcherTap         chan struct{}
 	eventStream           chan<- *ffcapi.ListenerEvent
 	connector             ffcapi.API
-	requiredConfirmations int
+	requiredConfirmations uint64
 	retry                 *retry.Retry
 	processorDone         chan struct{}
 	dispatcherDone        chan struct{}
@@ -69,6 +69,9 @@ func (bcm *blockConfirmationManager) StartConfirmedBlockListener(ctx context.Con
 }
 
 func (bcm *blockConfirmationManager) startConfirmedBlockListener(fgCtx context.Context, id *fftypes.UUID, fromBlock string, checkpoint *ffcapi.BlockListenerCheckpoint, eventStream chan<- *ffcapi.ListenerEvent) (cbl *confirmedBlockListener, err error) {
+	if bcm.chainTrackingMode == ffcapi.ChainTrackingModeLight {
+		return nil, i18n.NewError(fgCtx, tmmsgs.MsgConfirmedBlockListenerUnsupportedMode, bcm.chainTrackingMode)
+	}
 	cbl = &confirmedBlockListener{
 		bcm: bcm,
 		// We need our own listener for each confirmed block stream, and the bcm has to fan out
@@ -346,7 +349,7 @@ func (cbl *confirmedBlockListener) dispatchAllConfirmed() {
 	for {
 		var toDispatch *ffcapi.ListenerEvent
 		cbl.stateLock.Lock()
-		if len(cbl.blocksSinceCheckpoint) > cbl.requiredConfirmations {
+		if uint64(len(cbl.blocksSinceCheckpoint)) > cbl.requiredConfirmations {
 			block := cbl.blocksSinceCheckpoint[0]
 			// don't want memory to grow indefinitely by shifting right, so we create a new slice here
 			cbl.blocksSinceCheckpoint = append([]*apitypes.BlockInfo{}, cbl.blocksSinceCheckpoint[1:]...)

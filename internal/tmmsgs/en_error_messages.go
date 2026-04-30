@@ -109,4 +109,7 @@ var (
 	MsgStreamAPIManagedNameNoIDOrType          = ffe("FF21092", "API managed streams must have a name, but no ID or type", http.StatusBadRequest)
 	MsgUpdatePayloadEmpty                      = ffe("FF21093", "Update transaction must have a non-empty payload", http.StatusBadRequest)
 	MsgTxHandlerUnsupportedFieldForUpdate      = ffe("FF21094", "Update '%s' in the transaction is not supported by the transaction handler", http.StatusBadRequest)
+	MsgConfirmedBlockListenerUnsupportedMode   = ffe("FF21095", "Block listener is not supported when chain tracking mode is '%s'", http.StatusBadRequest)
+	MsgTransactionReceiptMissingBlockHash      = ffe("FF21096", "Transaction receipt missing block hash")
+	MsgTransactionReceiptBlockHashMismatch     = ffe("FF21097", "Transaction receipt block hash mismatch. Expected %s, got %s")
 )

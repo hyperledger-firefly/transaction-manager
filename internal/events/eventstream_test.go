@@ -70,7 +70,8 @@ func testESConf(t *testing.T, j string) (spec *apitypes.EventStream) {
 
 func newTestEventStream(t *testing.T, conf string) (es *eventStream) {
 	tmconfig.Reset()
-	es, err := newTestEventStreamWithListener(t, &ffcapimocks.API{}, conf)
+	mca := &ffcapimocks.API{}
+	es, err := newTestEventStreamWithListener(t, mca, conf)
 	assert.NoError(t, err)
 	return es
 }
@@ -90,7 +91,7 @@ func newTestEventStreamWithListener(t *testing.T, mfc *ffcapimocks.API, conf str
 	tmconfig.Reset()
 	config.Set(tmconfig.EventStreamsDefaultsBatchTimeout, "1us")
 	InitDefaults()
-
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	ees, err := NewEventStream(context.Background(), testESConf(t, conf),
 		mfc,
 		&persistencemocks.Persistence{},
@@ -131,8 +132,10 @@ func TestNewTestEventStreamMissingID(t *testing.T) {
 	tmconfig.Reset()
 	InitDefaults()
 	emm := &metricsmocks.EventMetricsEmitter{}
+	mca := &ffcapimocks.API{}
+	mca.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	_, err := NewEventStream(context.Background(), &apitypes.EventStream{},
-		&ffcapimocks.API{},
+		mca,
 		&persistencemocks.Persistence{},
 		&wsmocks.WebSocketChannels{},
 		[]*apitypes.Listener{},
@@ -145,8 +148,10 @@ func TestNewTestEventStreamBadConfig(t *testing.T) {
 	tmconfig.Reset()
 	InitDefaults()
 	emm := &metricsmocks.EventMetricsEmitter{}
+	mca := &ffcapimocks.API{}
+	mca.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	_, err := NewEventStream(context.Background(), testESConf(t, `{}`),
-		&ffcapimocks.API{},
+		mca,
 		&persistencemocks.Persistence{},
 		&wsmocks.WebSocketChannels{},
 		[]*apitypes.Listener{},
@@ -544,6 +549,7 @@ func TestAPIManagedEventStreamMissingListenerIDs(t *testing.T) {
 	InitDefaults()
 
 	mfc := &ffcapimocks.API{}
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	// Checkpoints are commonly tied to individual listeners, so it is critical that the caller manages
 	// deterministically the IDs of the listeners passed in. They cannot be empty (an error will be returned)
 	_, err := NewAPIManagedEventStream(context.Background(),
@@ -571,6 +577,7 @@ func TestAPIManagedEventStreamE2E(t *testing.T) {
 	}
 
 	mfc := &ffcapimocks.API{}
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	ees, err := NewAPIManagedEventStream(context.Background(),
 		testESConf(t, `{}`),
 		mfc,
@@ -750,7 +757,7 @@ func TestWebhookEventStreamsE2EAddAfterStart(t *testing.T) {
 	}
 
 	mfc := es.connector.(*ffcapimocks.API)
-
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.MatchedBy(func(req *ffcapi.EventListenerVerifyOptionsRequest) bool {
 		return req.FromBlock == "12345" && req.Options.JSONObject().GetString("option1") == "value1"
 	})).Return(&ffcapi.EventListenerVerifyOptionsResponse{
@@ -858,7 +865,6 @@ func TestStartWithExistingStreamOk(t *testing.T) {
 	}
 
 	mfc := &ffcapimocks.API{}
-
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{}, ffcapi.ErrorReason(""), nil)
 
 	_, err := newTestEventStreamWithListener(t, mfc, `{
@@ -878,7 +884,6 @@ func TestStartWithExistingStreamFail(t *testing.T) {
 	}
 
 	mfc := &ffcapimocks.API{}
-
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{}, ffcapi.ErrorReason(""), fmt.Errorf("pop"))
 
 	_, err := newTestEventStreamWithListener(t, mfc, `{
@@ -903,6 +908,7 @@ func TestUpdateStreamStarted(t *testing.T) {
 
 	mfc := es.connector.(*ffcapimocks.API)
 
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{}, ffcapi.ErrorReason(""), nil)
 
 	started := make(chan *ffcapi.EventStreamStartRequest, 1)
@@ -967,6 +973,7 @@ func TestAddRemoveListener(t *testing.T) {
 
 	mfc := es.connector.(*ffcapimocks.API)
 
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{}, ffcapi.ErrorReason(""), nil)
 
 	started := make(chan *ffcapi.EventStreamStartRequest, 1)
@@ -1024,6 +1031,7 @@ func TestUpdateListenerAndDeleteStarted(t *testing.T) {
 
 	mfc := es.connector.(*ffcapimocks.API)
 
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{}, ffcapi.ErrorReason(""), nil)
 
 	started := make(chan *ffcapi.EventStreamStartRequest, 1)
@@ -1095,6 +1103,7 @@ func TestUpdateListenerFail(t *testing.T) {
 
 	mfc := es.connector.(*ffcapimocks.API)
 
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{}, ffcapi.ErrorReason(""), nil)
 
 	started := make(chan *ffcapi.EventStreamStartRequest, 1)
@@ -1175,6 +1184,7 @@ func TestUpdateStreamRestartFail(t *testing.T) {
 
 	mfc := es.connector.(*ffcapimocks.API)
 
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{}, ffcapi.ErrorReason(""), nil)
 
 	started := make(chan *ffcapi.EventStreamStartRequest, 1)
@@ -1234,6 +1244,7 @@ func TestUpdateAttemptChangeSignature(t *testing.T) {
 
 	mfc := es.connector.(*ffcapimocks.API)
 
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{
 		ResolvedSignature: "sig1",
 	}, ffcapi.ErrorReason(""), nil).Once()
@@ -1399,7 +1410,7 @@ func TestAttemptResetNonExistentListener(t *testing.T) {
 	}`)
 
 	mfc := es.connector.(*ffcapimocks.API)
-
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{}, ffcapi.ErrorReason(""), nil)
 
 	l := &apitypes.Listener{
@@ -1428,7 +1439,7 @@ func TestUpdateStreamStopFail(t *testing.T) {
 	}
 
 	mfc := es.connector.(*ffcapimocks.API)
-
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{}, ffcapi.ErrorReason(""), nil)
 
 	started := make(chan *ffcapi.EventStreamStartRequest, 1)
@@ -1486,6 +1497,7 @@ func TestResetListenerRestartFail(t *testing.T) {
 	}
 
 	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{}, ffcapi.ErrorReason(""), nil)
 
 	started := make(chan *ffcapi.EventStreamStartRequest, 1)
@@ -1538,6 +1550,7 @@ func TestResetListenerWriteCheckpointFail(t *testing.T) {
 	}
 
 	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{}, ffcapi.ErrorReason(""), nil)
 
 	msp := es.checkpointsDB.(*persistencemocks.Persistence)
@@ -1586,7 +1599,7 @@ func TestWebSocketBroadcastActionCloseDuringCheckpoint(t *testing.T) {
 	}
 
 	mfc := es.connector.(*ffcapimocks.API)
-
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{}, ffcapi.ErrorReason(""), nil)
 
 	started := make(chan *ffcapi.EventStreamStartRequest, 1)
@@ -1661,6 +1674,7 @@ func TestActionRetryOk(t *testing.T) {
 	}`)
 
 	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventStreamStart", mock.Anything, mock.MatchedBy(func(r *ffcapi.EventStreamStartRequest) bool {
 		return r.ID.Equals(es.spec.ID)
 	})).Return(&ffcapi.EventStreamStartResponse{}, ffcapi.ErrorReason(""), nil).Once()
@@ -1712,6 +1726,7 @@ func TestActionRetrySkip(t *testing.T) {
 	}`)
 
 	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventStreamStart", mock.Anything, mock.MatchedBy(func(r *ffcapi.EventStreamStartRequest) bool {
 		return r.ID.Equals(es.spec.ID)
 	})).Return(&ffcapi.EventStreamStartResponse{}, ffcapi.ErrorReason(""), nil).Once()
@@ -1754,6 +1769,7 @@ func TestActionRetryBlock(t *testing.T) {
 	}`)
 
 	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventStreamStart", mock.Anything, mock.MatchedBy(func(r *ffcapi.EventStreamStartRequest) bool {
 		return r.ID.Equals(es.spec.ID)
 	})).Return(&ffcapi.EventStreamStartResponse{}, ffcapi.ErrorReason(""), nil).Once()
@@ -1805,6 +1821,7 @@ func TestDeleteFail(t *testing.T) {
 	}`)
 
 	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	mfc.On("EventStreamStart", mock.Anything, mock.MatchedBy(func(r *ffcapi.EventStreamStartRequest) bool {
 		return r.ID.Equals(es.spec.ID)
 	})).Return(&ffcapi.EventStreamStartResponse{}, ffcapi.ErrorReason(""), nil).Once()
@@ -2223,6 +2240,7 @@ func TestStartAPIEventStreamStartFail(t *testing.T) {
 	}
 
 	mfc := &ffcapimocks.API{}
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	ees, err := NewAPIManagedEventStream(context.Background(),
 		testESConf(t, `{}`),
 		mfc,
@@ -2255,6 +2273,7 @@ func TestStartAPIEventStreamPollContextCancelled(t *testing.T) {
 	}
 
 	mfc := &ffcapimocks.API{}
+	mfc.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	ees, err := NewAPIManagedEventStream(context.Background(),
 		testESConf(t, `{}`),
 		mfc,

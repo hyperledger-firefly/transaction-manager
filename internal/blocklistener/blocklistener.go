@@ -24,7 +24,7 @@ import (
 )
 
 type NewBlockHashConsumer interface {
-	NewBlockHashes() chan<- *ffcapi.BlockHashEvent
+	GetReceiveChannel() chan<- *ffcapi.BlockHashEvent
 }
 
 // BufferChannel ensures it always pulls blocks from the channel passed to the connector
@@ -49,7 +49,7 @@ func BufferChannel(ctx context.Context, target NewBlockHashConsumer) (buffered c
 					// Have to discard this
 					blockedUpdate.GapPotential = true // there is a gap for sure at this point
 					log.L(ctx).Debugf("Blocked event stream missed new block event: %v", blockUpdate.BlockHashes)
-				case target.NewBlockHashes() <- blockedUpdate:
+				case target.GetReceiveChannel() <- blockedUpdate:
 					// We're not blocked any more
 					log.L(ctx).Infof("Event stream block-listener unblocked")
 					blockedUpdate = nil
@@ -64,7 +64,7 @@ func BufferChannel(ctx context.Context, target NewBlockHashConsumer) (buffered c
 					// Nothing to do unless we have confirmations turned on
 					if target != nil {
 						select {
-						case target.NewBlockHashes() <- update:
+						case target.GetReceiveChannel() <- update:
 							// all good, we passed it on
 						default:
 							// we can't deliver it immediately, we switch to blocked mode

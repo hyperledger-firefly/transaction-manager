@@ -45,7 +45,7 @@ func TestCBLCatchUpToHeadFromZeroNoConfirmations(t *testing.T) {
 	cbl, err := bcm.startConfirmedBlockListener(bcm.ctx, id, ffcapi.FromBlockEarliest, nil, esDispatch)
 	assert.NoError(t, err)
 
-	for i := 0; i < len(blocks)-bcm.requiredConfirmations; i++ {
+	for i := 0; i < len(blocks)-int(bcm.requiredConfirmations); i++ {
 		b := <-esDispatch
 		assert.Equal(t, b.BlockEvent.BlockInfo, blocks[i].BlockInfo)
 	}
@@ -73,13 +73,13 @@ func TestCBLCatchUpToHeadFromZeroWithConfirmations(t *testing.T) {
 	cbl, err := bcm.startConfirmedBlockListener(bcm.ctx, id, ffcapi.FromBlockEarliest, nil, esDispatch)
 	assert.NoError(t, err)
 
-	for i := 0; i < len(blocks)-bcm.requiredConfirmations; i++ {
+	for i := 0; i < len(blocks)-int(bcm.requiredConfirmations); i++ {
 		b := <-esDispatch
 		assert.Equal(t, b.BlockEvent.BlockInfo, blocks[i].BlockInfo)
 	}
 
 	time.Sleep(1 * time.Millisecond)
-	assert.Len(t, cbl.blocksSinceCheckpoint, bcm.requiredConfirmations)
+	assert.Len(t, cbl.blocksSinceCheckpoint, int(bcm.requiredConfirmations))
 	select {
 	case <-esDispatch:
 		assert.Fail(t, "should not have received block in confirmation window")
@@ -120,14 +120,14 @@ func TestCBLListenFromCurrentBlock(t *testing.T) {
 		BlockHashes: []string{blocks[1].BlockHash},
 	})
 
-	for i := 5; i < len(blocks)-bcm.requiredConfirmations; i++ {
+	for i := 5; i < len(blocks)-int(bcm.requiredConfirmations); i++ {
 		b := <-esDispatch
 		assert.Equal(t, b.BlockEvent.BlockNumber, blocks[i].BlockNumber)
 		assert.Equal(t, b.BlockEvent.BlockInfo, blocks[i].BlockInfo)
 	}
 
 	time.Sleep(1 * time.Millisecond)
-	assert.Len(t, cbl.blocksSinceCheckpoint, bcm.requiredConfirmations)
+	assert.Len(t, cbl.blocksSinceCheckpoint, int(bcm.requiredConfirmations))
 	select {
 	case <-esDispatch:
 		assert.Fail(t, "should not have received block in confirmation window")
@@ -248,11 +248,11 @@ func testCBLHandleReorgInConfirmationWindow(t *testing.T, blockLenBeforeReorg, o
 	mbiHash := mca.On("BlockInfoByHash", mock.Anything, mock.Anything)
 	mbiHash.Run(func(args mock.Arguments) { mockBlockHashReturn(mbiHash, args, blocksAfterReorg) })
 
-	bcm.requiredConfirmations = reqConf
+	bcm.requiredConfirmations = uint64(reqConf)
 	cbl, err := bcm.startConfirmedBlockListener(bcm.ctx, id, ffcapi.FromBlockEarliest, nil, esDispatch)
 	assert.NoError(t, err)
 
-	for i := 0; i < len(blocksAfterReorg)-bcm.requiredConfirmations; i++ {
+	for i := 0; i < len(blocksAfterReorg)-int(bcm.requiredConfirmations); i++ {
 		b := <-esDispatch
 		dangerArea := len(blocksAfterReorg) - overlap
 		if i >= overlap && i < (dangerArea-reqConf) {
@@ -265,7 +265,7 @@ func testCBLHandleReorgInConfirmationWindow(t *testing.T, blockLenBeforeReorg, o
 	}
 
 	time.Sleep(1 * time.Millisecond)
-	assert.LessOrEqual(t, len(cbl.blocksSinceCheckpoint), bcm.requiredConfirmations)
+	assert.LessOrEqual(t, len(cbl.blocksSinceCheckpoint), int(bcm.requiredConfirmations))
 	select {
 	case b := <-esDispatch:
 		assert.Fail(t, fmt.Sprintf("should not have received block in confirmation window: %d/%s", b.BlockEvent.BlockNumber.Int64(), b.BlockEvent.BlockHash))
@@ -318,7 +318,7 @@ func TestCBLHandleRandomConflictingBlockNotification(t *testing.T) {
 	assert.NoError(t, err)
 	cbl.requiredConfirmations = 5
 
-	for i := 0; i < len(blocks)-cbl.requiredConfirmations; i++ {
+	for i := 0; i < len(blocks)-int(cbl.requiredConfirmations); i++ {
 		b := <-esDispatch
 		assert.Equal(t, b.BlockEvent.BlockInfo, blocks[i].BlockInfo)
 	}

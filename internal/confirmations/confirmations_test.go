@@ -16,6 +16,7 @@ package confirmations
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"testing"
@@ -43,6 +44,7 @@ func newTestBlockConfirmationManager() (*blockConfirmationManager, *ffcapimocks.
 func newTestBlockConfirmationManagerCustomConfig() (*blockConfirmationManager, *ffcapimocks.API) {
 	logrus.SetLevel(logrus.DebugLevel)
 	mca := &ffcapimocks.API{}
+	mca.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeFull, nil).Maybe()
 	emm := &metricsmocks.EventMetricsEmitter{}
 	emm.On("RecordNotificationQueueingMetrics", mock.Anything, mock.Anything, mock.Anything).Maybe()
 	emm.On("RecordBlockHashProcessMetrics", mock.Anything, mock.Anything).Maybe()
@@ -52,8 +54,32 @@ func newTestBlockConfirmationManagerCustomConfig() (*blockConfirmationManager, *
 	emm.On("RecordConfirmationMetrics", mock.Anything, mock.Anything).Maybe()
 	emm.On("RecordBlockHashQueueingMetrics", mock.Anything, mock.Anything).Maybe()
 	emm.On("RecordBlockHashBatchSizeMetric", mock.Anything, mock.Anything).Maybe()
+
 	bcm := NewBlockConfirmationManager(context.Background(), mca, "ut", emm).(*blockConfirmationManager)
 	bcm.receiptChecker = newReceiptChecker(bcm, 0, emm) // no workers, but non-nil
+	return bcm, mca
+}
+
+func newTestBlockConfirmationManagerHeadBlockNumber() (*blockConfirmationManager, *ffcapimocks.API) {
+	tmconfig.Reset()
+	config.Set(tmconfig.ConfirmationsRequired, 3)
+	config.Set(tmconfig.ConfirmationsNotificationQueueLength, 10)
+	config.Set(tmconfig.ConfirmationsReceiptWorkers, 0)
+	config.Set(tmconfig.ConfirmationsFetchReceiptUponEntry, false)
+	logrus.SetLevel(logrus.DebugLevel)
+	mca := &ffcapimocks.API{}
+	mca.On("GetChainTrackingMode", mock.Anything).Return(ffcapi.ChainTrackingModeLight).Maybe()
+	emm := &metricsmocks.EventMetricsEmitter{}
+	emm.On("RecordNotificationQueueingMetrics", mock.Anything, mock.Anything, mock.Anything).Maybe()
+	emm.On("RecordBlockHashProcessMetrics", mock.Anything, mock.Anything).Maybe()
+	emm.On("RecordNotificationProcessMetrics", mock.Anything, mock.Anything, mock.Anything).Maybe()
+	emm.On("RecordReceiptCheckMetrics", mock.Anything, mock.Anything, mock.Anything).Maybe()
+	emm.On("RecordReceiptMetrics", mock.Anything, mock.Anything, mock.Anything).Maybe()
+	emm.On("RecordConfirmationMetrics", mock.Anything, mock.Anything).Maybe()
+	emm.On("RecordBlockHashQueueingMetrics", mock.Anything, mock.Anything).Maybe()
+	emm.On("RecordBlockHashBatchSizeMetric", mock.Anything, mock.Anything).Maybe()
+
+	bcm := NewBlockConfirmationManager(context.Background(), mca, "ut", emm).(*blockConfirmationManager)
 	return bcm, mca
 }
 
@@ -76,7 +102,7 @@ func TestBlockConfirmationManagerE2ENewEvent(t *testing.T) {
 	}
 
 	// First poll for changes gives nothing, but we load up the event at this point for the next round
-	blockHashes := bcm.NewBlockHashes()
+	blockHashes := bcm.GetReceiveChannel()
 
 	// Next time round gives a block that is in the confirmation chain, but one block ahead
 	block1003 := &apitypes.BlockInfo{
@@ -131,6 +157,7 @@ func TestBlockConfirmationManagerE2ENewEvent(t *testing.T) {
 
 	// Then we should walk the chain by number to fill in 1003, because our HWM is 1003.
 	mca.On("BlockInfoByNumber", mock.Anything, mock.MatchedBy(func(r *ffcapi.BlockInfoByNumberRequest) bool {
+		fmt.Println("BlockInfoByNumber", r.BlockNumber.Uint64())
 		return r.BlockNumber.Uint64() == 1003
 	})).Run(func(args mock.Arguments) {
 		blockHashes <- &ffcapi.BlockHashEvent{
@@ -163,6 +190,8 @@ func TestBlockConfirmationManagerE2ENewEvent(t *testing.T) {
 		apitypes.ConfirmationFromBlock(block1002),
 		apitypes.ConfirmationFromBlock(block1003),
 	}, dispatched.Confirmations)
+	assert.Equal(t, uint64(2), dispatched.CurrentConfirmationCount)
+	assert.Equal(t, uint64(3), dispatched.TargetConfirmationCount)
 	assert.True(t, dispatched.NewFork)
 	assert.False(t, dispatched.Confirmed)
 
@@ -171,6 +200,8 @@ func TestBlockConfirmationManagerE2ENewEvent(t *testing.T) {
 	assert.Equal(t, []*apitypes.Confirmation{
 		apitypes.ConfirmationFromBlock(block1004),
 	}, dispatched.Confirmations)
+	assert.Equal(t, uint64(3), dispatched.CurrentConfirmationCount)
+	assert.Equal(t, uint64(3), dispatched.TargetConfirmationCount)
 	assert.False(t, dispatched.NewFork)
 	assert.True(t, dispatched.Confirmed)
 
@@ -209,7 +240,7 @@ func TestBlockConfirmationManagerE2EFork(t *testing.T) {
 		ParentHash:  "0x64fd8179b80dd255d52ce60d7f265c0506be810e2f3df52463fadeb44bb4d2df",
 	}
 
-	blockHashes := bcm.NewBlockHashes()
+	blockHashes := bcm.GetReceiveChannel()
 	blockHashes <- &ffcapi.BlockHashEvent{
 		BlockHashes: []string{
 			block1002.BlockHash,
@@ -357,7 +388,7 @@ func TestBlockConfirmationManagerE2EForkReNotifyConfirmations(t *testing.T) {
 		ParentHash:  "0x64fd8179b80dd255d52ce60d7f265c0506be810e2f3df52463fadeb44bb4d2df",
 	}
 
-	blockHashes := bcm.NewBlockHashes()
+	blockHashes := bcm.GetReceiveChannel()
 
 	// Have the event notification in flight from the beginning
 	err := bcm.Notify(&Notification{
@@ -500,7 +531,7 @@ func TestBlockConfirmationManagerE2ETransactionMovedFork(t *testing.T) {
 	}
 
 	// The next filter gives us 1002a, which will later be removed
-	blockHashes := bcm.NewBlockHashes()
+	blockHashes := bcm.GetReceiveChannel()
 
 	// First check while walking the chain does not yield a block
 	mca.On("BlockInfoByNumber", mock.Anything, mock.MatchedBy(func(r *ffcapi.BlockInfoByNumberRequest) bool {
@@ -921,7 +952,7 @@ func TestConfirmationsFailWalkChainAfterBlockGap(t *testing.T) {
 	assert.NoError(t, err)
 
 	mca.On("BlockInfoByNumber", mock.Anything, mock.Anything).Return(nil, ffcapi.ErrorReasonNotFound, fmt.Errorf("not found")).Run(func(args mock.Arguments) {
-		bcm.NewBlockHashes() <- &ffcapi.BlockHashEvent{
+		bcm.GetReceiveChannel() <- &ffcapi.BlockHashEvent{
 			GapPotential: true,
 		}
 	}).Once()
@@ -1303,5 +1334,495 @@ func TestBlockState(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Nil(t, block) // above high water mark
 
+	mca.AssertExpectations(t)
+}
+
+func TestBlockConfirmationManagerHeadBlockNumberConfirmsEvent(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+	blockHash := "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542"
+	confirmed := make(chan *apitypes.ConfirmationsNotification, 5)
+	eventToConfirm := &EventInfo{
+		ID: &ffcapi.EventID{
+			ListenerID:       fftypes.NewUUID(),
+			TransactionHash:  txHash,
+			BlockHash:        blockHash,
+			BlockNumber:      1001,
+			TransactionIndex: 5,
+			LogIndex:         10,
+		},
+		Confirmations: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
+			confirmed <- notification
+		},
+	}
+
+	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
+		return r.TransactionHash == txHash
+	})).Return(&ffcapi.TransactionReceiptResponse{
+		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
+			BlockNumber: fftypes.NewFFBigInt(1001),
+			BlockHash:   blockHash,
+		},
+	}, ffcapi.ErrorReason(""), nil).Once()
+
+	bcm.Start()
+	blockEvents := bcm.GetReceiveChannel()
+
+	blockEvents <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1001}
+
+	err := bcm.Notify(&Notification{
+		NotificationType: NewEventLog,
+		Event:            eventToConfirm,
+	})
+	assert.NoError(t, err)
+
+	n0 := <-confirmed
+	assert.False(t, n0.Confirmed)
+	assert.False(t, n0.NewFork)
+	assert.Equal(t, uint64(0), n0.CurrentConfirmationCount)
+	assert.Equal(t, uint64(3), n0.TargetConfirmationCount)
+	assert.Empty(t, n0.Confirmations)
+
+	blockEvents <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1004}
+
+	n1 := <-confirmed
+	assert.True(t, n1.Confirmed)
+	assert.False(t, n1.NewFork)
+	assert.Equal(t, uint64(3), n1.CurrentConfirmationCount)
+	assert.Equal(t, uint64(3), n1.TargetConfirmationCount)
+	assert.Empty(t, n1.Confirmations)
+
+	bcm.Stop()
+	mca.AssertExpectations(t)
+}
+
+func TestBlockConfirmationManagerHeadBlockNumberNewForkOnHeadDrop(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+	blockHash := "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542"
+	confirmed := make(chan *apitypes.ConfirmationsNotification, 5)
+	eventToConfirm := &EventInfo{
+		ID: &ffcapi.EventID{
+			ListenerID:       fftypes.NewUUID(),
+			TransactionHash:  txHash,
+			BlockHash:        blockHash,
+			BlockNumber:      1001,
+			TransactionIndex: 5,
+			LogIndex:         10,
+		},
+		Confirmations: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
+			confirmed <- notification
+		},
+	}
+
+	bcm.Start()
+	ch := bcm.GetReceiveChannel()
+
+	// Prime head so this iteration completes before Notify is queued; otherwise the select
+	// may handle Notify first while head is still zero (same pattern as TestBlockConfirmationManagerHeadBlockNumberConfirmsEvent).
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1001}
+
+	err := bcm.Notify(&Notification{
+		NotificationType: NewEventLog,
+		Event:            eventToConfirm,
+	})
+	assert.NoError(t, err)
+
+	n0 := <-confirmed
+	assert.False(t, n0.Confirmed)
+	assert.False(t, n0.NewFork)
+	assert.Equal(t, uint64(0), n0.CurrentConfirmationCount)
+
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1003}
+
+	n1 := <-confirmed
+	assert.False(t, n1.Confirmed)
+	assert.False(t, n1.NewFork)
+	assert.Equal(t, uint64(2), n1.CurrentConfirmationCount)
+
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1002}
+
+	n2 := <-confirmed
+	assert.False(t, n2.Confirmed)
+	assert.True(t, n2.NewFork)
+	assert.Equal(t, uint64(1), n2.CurrentConfirmationCount)
+
+	// validate confirmation for the new head block
+	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
+		return r.TransactionHash == txHash
+	})).Return(&ffcapi.TransactionReceiptResponse{
+		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
+			BlockNumber: fftypes.NewFFBigInt(1001),
+			BlockHash:   blockHash,
+		},
+	}, ffcapi.ErrorReason(""), nil).Once()
+
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 2002}
+	n3 := <-confirmed
+	assert.True(t, n3.Confirmed)
+	assert.False(t, n3.NewFork)
+	assert.Equal(t, uint64(3), n3.CurrentConfirmationCount)
+	assert.Equal(t, uint64(3), n3.TargetConfirmationCount)
+
+	bcm.Stop()
+	mca.AssertExpectations(t)
+}
+
+func TestBlockConfirmationManagerHeadBlockNumberReceiptNotFoundReschedules(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+	blockHash := "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542"
+	confirmed := make(chan *apitypes.ConfirmationsNotification, 5)
+	eventToConfirm := &EventInfo{
+		ID: &ffcapi.EventID{
+			ListenerID:       fftypes.NewUUID(),
+			TransactionHash:  txHash,
+			BlockHash:        blockHash,
+			BlockNumber:      1001,
+			TransactionIndex: 5,
+			LogIndex:         10,
+		},
+		Confirmations: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
+			confirmed <- notification
+		},
+	}
+
+	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
+		return r.TransactionHash == txHash
+	})).Return(nil, ffcapi.ErrorReasonNotFound, errors.New("not found")).Once()
+
+	bcm.Start()
+	ch := bcm.GetReceiveChannel()
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1001}
+	assert.NoError(t, bcm.Notify(&Notification{
+		NotificationType: NewEventLog,
+		Event:            eventToConfirm,
+	}))
+	<-confirmed
+
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1004}
+	// Wait until the not-found receipt path has re-queued a check (safe to read under
+	// receiptChecker.cond). pendingItem fields are updated by the listener without
+	// pendingMux, so assert those only after Stop freezes the listener.
+	assert.Eventually(t, func() bool {
+		bcm.receiptChecker.cond.L.Lock()
+		l := bcm.receiptChecker.entries.Len()
+		bcm.receiptChecker.cond.L.Unlock()
+		return l == 1
+	}, time.Second, 5*time.Millisecond)
+
+	select {
+	case n := <-confirmed:
+		t.Fatalf("unexpected confirmation notification: %+v", n)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	bcm.Stop()
+
+	bcm.pendingMux.Lock()
+	var cleared *pendingItem
+	for _, pi := range bcm.pending {
+		cleared = pi
+		break
+	}
+	bcm.pendingMux.Unlock()
+	assert.NotNil(t, cleared)
+	assert.Equal(t, "", cleared.blockHash)
+	assert.Equal(t, uint64(0), cleared.blockNumber)
+	assert.Nil(t, cleared.previousConfirmationCount)
+	mca.AssertExpectations(t)
+}
+
+func TestBlockConfirmationManagerHeadBlockNumberReceiptMissingBlockHash(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+	blockHash := "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542"
+	confirmed := make(chan *apitypes.ConfirmationsNotification, 5)
+	eventToConfirm := &EventInfo{
+		ID: &ffcapi.EventID{
+			ListenerID:       fftypes.NewUUID(),
+			TransactionHash:  txHash,
+			BlockHash:        blockHash,
+			BlockNumber:      1001,
+			TransactionIndex: 5,
+			LogIndex:         10,
+		},
+		Confirmations: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
+			confirmed <- notification
+		},
+	}
+
+	receiptChecked := make(chan struct{}, 1)
+	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
+		return r.TransactionHash == txHash
+	})).Run(func(mock.Arguments) {
+		receiptChecked <- struct{}{}
+	}).Return(&ffcapi.TransactionReceiptResponse{
+		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
+			BlockNumber: fftypes.NewFFBigInt(1001),
+			BlockHash:   "",
+		},
+	}, ffcapi.ErrorReason(""), nil).Once()
+
+	bcm.Start()
+	ch := bcm.GetReceiveChannel()
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1001}
+	assert.NoError(t, bcm.Notify(&Notification{
+		NotificationType: NewEventLog,
+		Event:            eventToConfirm,
+	}))
+	<-confirmed
+
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1004}
+	select {
+	case <-receiptChecked:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for TransactionReceipt")
+	}
+
+	pendingKey := (&Notification{NotificationType: NewEventLog, Event: eventToConfirm}).eventPendingItem().getKey()
+	bcm.pendingMux.Lock()
+	p := bcm.pending[pendingKey]
+	bcm.pendingMux.Unlock()
+	assert.NotNil(t, p)
+	assert.Equal(t, blockHash, p.blockHash)
+	assert.Equal(t, uint64(1001), p.blockNumber)
+	assert.Equal(t, 0, bcm.receiptChecker.entries.Len())
+
+	select {
+	case n := <-confirmed:
+		t.Fatalf("unexpected confirmation notification: %+v", n)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	bcm.Stop()
+	mca.AssertExpectations(t)
+}
+
+func TestBlockConfirmationManagerHeadBlockNumberReceiptNilResponse(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+	blockHash := "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542"
+	confirmed := make(chan *apitypes.ConfirmationsNotification, 5)
+	eventToConfirm := &EventInfo{
+		ID: &ffcapi.EventID{
+			ListenerID:       fftypes.NewUUID(),
+			TransactionHash:  txHash,
+			BlockHash:        blockHash,
+			BlockNumber:      1001,
+			TransactionIndex: 5,
+			LogIndex:         10,
+		},
+		Confirmations: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
+			confirmed <- notification
+		},
+	}
+
+	receiptChecked := make(chan struct{}, 1)
+	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
+		return r.TransactionHash == txHash
+	})).Run(func(mock.Arguments) {
+		receiptChecked <- struct{}{}
+	}).Return(nil, ffcapi.ErrorReason(""), nil).Once()
+
+	bcm.Start()
+	ch := bcm.GetReceiveChannel()
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1001}
+	assert.NoError(t, bcm.Notify(&Notification{
+		NotificationType: NewEventLog,
+		Event:            eventToConfirm,
+	}))
+	<-confirmed
+
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1004}
+	select {
+	case <-receiptChecked:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for TransactionReceipt")
+	}
+
+	pendingKey := (&Notification{NotificationType: NewEventLog, Event: eventToConfirm}).eventPendingItem().getKey()
+	bcm.pendingMux.Lock()
+	p := bcm.pending[pendingKey]
+	bcm.pendingMux.Unlock()
+	assert.NotNil(t, p)
+	assert.Equal(t, blockHash, p.blockHash)
+	assert.Equal(t, 0, bcm.receiptChecker.entries.Len())
+
+	select {
+	case n := <-confirmed:
+		t.Fatalf("unexpected confirmation notification: %+v", n)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	bcm.Stop()
+	mca.AssertExpectations(t)
+}
+
+func TestBlockConfirmationManagerHeadBlockNumberReceiptBlockHashMismatch(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+	blockHash := "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542"
+	receiptHash := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	confirmed := make(chan *apitypes.ConfirmationsNotification, 5)
+	eventToConfirm := &EventInfo{
+		ID: &ffcapi.EventID{
+			ListenerID:       fftypes.NewUUID(),
+			TransactionHash:  txHash,
+			BlockHash:        blockHash,
+			BlockNumber:      1001,
+			TransactionIndex: 5,
+			LogIndex:         10,
+		},
+		Confirmations: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
+			confirmed <- notification
+		},
+	}
+
+	receiptChecked := make(chan struct{}, 1)
+	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
+		return r.TransactionHash == txHash
+	})).Run(func(mock.Arguments) {
+		receiptChecked <- struct{}{}
+	}).Return(&ffcapi.TransactionReceiptResponse{
+		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
+			BlockNumber: fftypes.NewFFBigInt(1005),
+			BlockHash:   receiptHash,
+		},
+	}, ffcapi.ErrorReason(""), nil).Once()
+
+	bcm.Start()
+	ch := bcm.GetReceiveChannel()
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1001}
+	assert.NoError(t, bcm.Notify(&Notification{
+		NotificationType: NewEventLog,
+		Event:            eventToConfirm,
+	}))
+	<-confirmed
+
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1004}
+	select {
+	case <-receiptChecked:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for TransactionReceipt")
+	}
+
+	pendingKey := (&Notification{NotificationType: NewEventLog, Event: eventToConfirm}).eventPendingItem().getKey()
+	bcm.pendingMux.Lock()
+	p := bcm.pending[pendingKey]
+	bcm.pendingMux.Unlock()
+	assert.NotNil(t, p)
+	assert.Equal(t, receiptHash, p.blockHash)
+	assert.Equal(t, uint64(1005), p.blockNumber)
+	assert.Nil(t, p.previousConfirmationCount)
+	assert.Equal(t, 0, bcm.receiptChecker.entries.Len())
+
+	select {
+	case n := <-confirmed:
+		t.Fatalf("unexpected confirmation notification: %+v", n)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	bcm.Stop()
+	mca.AssertExpectations(t)
+}
+
+func TestBlockConfirmationManagerHeadBlockNumberReceiptOtherErrorNoReschedule(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+	blockHash := "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542"
+	confirmed := make(chan *apitypes.ConfirmationsNotification, 5)
+	eventToConfirm := &EventInfo{
+		ID: &ffcapi.EventID{
+			ListenerID:       fftypes.NewUUID(),
+			TransactionHash:  txHash,
+			BlockHash:        blockHash,
+			BlockNumber:      1001,
+			TransactionIndex: 5,
+			LogIndex:         10,
+		},
+		Confirmations: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
+			confirmed <- notification
+		},
+	}
+
+	receiptChecked := make(chan struct{}, 1)
+	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
+		return r.TransactionHash == txHash
+	})).Run(func(mock.Arguments) {
+		receiptChecked <- struct{}{}
+	}).Return(nil, ffcapi.ErrorReason(""), errors.New("rpc unavailable")).Once()
+
+	bcm.Start()
+	ch := bcm.GetReceiveChannel()
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1001}
+	assert.NoError(t, bcm.Notify(&Notification{
+		NotificationType: NewEventLog,
+		Event:            eventToConfirm,
+	}))
+	<-confirmed
+
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1004}
+	select {
+	case <-receiptChecked:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for TransactionReceipt")
+	}
+
+	pendingKey := (&Notification{NotificationType: NewEventLog, Event: eventToConfirm}).eventPendingItem().getKey()
+	bcm.pendingMux.Lock()
+	p := bcm.pending[pendingKey]
+	bcm.pendingMux.Unlock()
+	assert.NotNil(t, p)
+	assert.Equal(t, blockHash, p.blockHash)
+	assert.Equal(t, uint64(1001), p.blockNumber)
+	assert.Equal(t, 0, bcm.receiptChecker.entries.Len())
+
+	select {
+	case n := <-confirmed:
+		t.Fatalf("unexpected confirmation notification: %+v", n)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	bcm.Stop()
+	mca.AssertExpectations(t)
+}
+
+// TestBlockConfirmationManagerHeadBlockNumberNoOpWithoutReceipt tests confirmationCheckUsingHeadBlockNumber
+// when a pending transaction has no block hash yet (no receipt): head updates must not call dispatch or TransactionReceipt.
+func TestBlockConfirmationManagerHeadBlockNumberNoOpWithoutReceipt(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+
+	bcm.Start()
+	ch := bcm.GetReceiveChannel()
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1001}
+
+	assert.NoError(t, bcm.Notify(&Notification{
+		NotificationType: NewTransaction,
+		Transaction: &TransactionInfo{
+			TransactionHash: txHash,
+		},
+	}))
+
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 1010}
+
+	pendingKey := pendingKeyForTX(txHash)
+	assert.Eventually(t, func() bool {
+		bcm.pendingMux.Lock()
+		defer bcm.pendingMux.Unlock()
+		p := bcm.pending[pendingKey]
+		return p != nil && p.blockHash == "" && p.blockNumber == 0
+	}, time.Second, 5*time.Millisecond)
+
+	bcm.Stop()
 	mca.AssertExpectations(t)
 }
