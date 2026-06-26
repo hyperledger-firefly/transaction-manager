@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/hyperledger/firefly-transaction-manager/internal/apiclient"
-	"github.com/hyperledger/firefly-transaction-manager/mocks/apiclientmocks"
+	"github.com/hyperledger-firefly/transaction-manager/internal/apiclient"
+	"github.com/hyperledger-firefly/transaction-manager/mocks/apiclientmocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )

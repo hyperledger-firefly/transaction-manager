@@ -17,7 +17,7 @@
 package ffcapi
 
 import (
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
 )
 
 type EventListenerRemoveRequest struct {

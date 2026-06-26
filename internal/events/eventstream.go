@@ -25,21 +25,21 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hyperledger/firefly-common/pkg/config"
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-common/pkg/retry"
-	"github.com/hyperledger/firefly-transaction-manager/internal/blocklistener"
-	"github.com/hyperledger/firefly-transaction-manager/internal/confirmations"
-	"github.com/hyperledger/firefly-transaction-manager/internal/metrics"
-	"github.com/hyperledger/firefly-transaction-manager/internal/persistence"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmconfig"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
-	"github.com/hyperledger/firefly-transaction-manager/internal/ws"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/eventapi"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/config"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/common/pkg/retry"
+	"github.com/hyperledger-firefly/transaction-manager/internal/blocklistener"
+	"github.com/hyperledger-firefly/transaction-manager/internal/confirmations"
+	"github.com/hyperledger-firefly/transaction-manager/internal/metrics"
+	"github.com/hyperledger-firefly/transaction-manager/internal/persistence"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmconfig"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/transaction-manager/internal/ws"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/eventapi"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 type Stream = eventapi.EventStream
@@ -163,7 +163,7 @@ func newEventStream(
 	initialListeners []*apitypes.Listener,
 	eme metrics.EventMetricsEmitter,
 ) (ees Stream, err error) {
-	esCtx := log.WithLogField(bgCtx, "eventstream", spec.ID.String())
+	esCtx := log.WithLogFields(bgCtx, "eventstream", spec.ID.String())
 	es := &eventStream{
 		bgCtx:                 esCtx,
 		status:                apitypes.EventStreamStatusStopped,

@@ -17,7 +17,7 @@
 package apitypes
 
 import (
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 // TransactionReceiptRequest is the request payload to query for a receipt

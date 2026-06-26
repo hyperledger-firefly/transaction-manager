@@ -1,6 +1,6 @@
-module github.com/hyperledger/firefly-transaction-manager
+module github.com/hyperledger-firefly/transaction-manager
 
-go 1.23.0
+go 1.26.4
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
@@ -12,7 +12,7 @@ require (
 	github.com/gorilla/mux v1.8.1
 	github.com/gorilla/websocket v1.5.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/hyperledger/firefly-common v1.5.8
+	github.com/hyperledger-firefly/common v1.6.1
 	github.com/lib/pq v1.10.9
 	github.com/oklog/ulid/v2 v2.1.0
 	github.com/prometheus/client_golang v1.18.0

@@ -17,7 +17,7 @@
 package apitypes
 
 import (
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 // QueryRequest is the request payload to send to perform a synchronous query against the blockchain state

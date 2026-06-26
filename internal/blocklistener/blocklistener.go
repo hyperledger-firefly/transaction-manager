@@ -19,8 +19,8 @@ package blocklistener
 import (
 	"context"
 
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 type NewBlockHashConsumer interface {

@@ -21,12 +21,12 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/txhandler"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/txhandler"
 )
 
 func (m *manager) ReconcileConfirmationsForTransaction(ctx context.Context, txHash string, existingConfirmations []*ffcapi.MinimalBlockInfo, targetConfirmationCount uint64) (*ffcapi.ConfirmationUpdateResult, error) {

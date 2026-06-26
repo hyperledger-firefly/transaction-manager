@@ -22,15 +22,15 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/hyperledger/firefly-common/pkg/config"
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-common/pkg/retry"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmconfig"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/config"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/common/pkg/retry"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmconfig"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 // confirmedBlockListener works differently to the main confirmation listener function,
@@ -88,7 +88,7 @@ func (bcm *blockConfirmationManager) startConfirmedBlockListener(fgCtx context.C
 	}
 	cbl.ctx, cbl.cancelFunc = context.WithCancel(bcm.ctx)
 	// add a log context for this specific confirmation manager (as there are many within the )
-	cbl.ctx = log.WithLogField(cbl.ctx, "role", fmt.Sprintf("confirmed_block_stream_%s", id))
+	cbl.ctx = log.WithLogFields(cbl.ctx, "role", fmt.Sprintf("confirmed_block_stream_%s", id))
 
 	switch fromBlock {
 	case "", ffcapi.FromBlockLatest:

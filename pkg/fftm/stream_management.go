@@ -21,16 +21,16 @@ import (
 	"encoding/json"
 	"strconv"
 
-	"github.com/hyperledger/firefly-common/pkg/ffapi"
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-transaction-manager/internal/events"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/eventapi"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/txhandler"
+	"github.com/hyperledger-firefly/common/pkg/ffapi"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/transaction-manager/internal/events"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/eventapi"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/txhandler"
 )
 
 const (

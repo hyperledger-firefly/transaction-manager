@@ -5,7 +5,7 @@ package metricsmocks
 import (
 	context "context"
 
-	metric "github.com/hyperledger/firefly-common/pkg/metric"
+	metric "github.com/hyperledger-firefly/common/pkg/metric"
 
 	mock "github.com/stretchr/testify/mock"
 )

@@ -5,11 +5,11 @@ package confirmationsmocks
 import (
 	context "context"
 
-	confirmations "github.com/hyperledger/firefly-transaction-manager/internal/confirmations"
+	confirmations "github.com/hyperledger-firefly/transaction-manager/internal/confirmations"
 
-	ffcapi "github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	ffcapi "github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 
-	fftypes "github.com/hyperledger/firefly-common/pkg/fftypes"
+	fftypes "github.com/hyperledger-firefly/common/pkg/fftypes"
 
 	mock "github.com/stretchr/testify/mock"
 )

@@ -19,12 +19,12 @@ package fftm
 import (
 	"context"
 
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-transaction-manager/internal/confirmations"
-	"github.com/hyperledger/firefly-transaction-manager/internal/ws"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/txhandler"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/transaction-manager/internal/confirmations"
+	"github.com/hyperledger-firefly/transaction-manager/internal/ws"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/txhandler"
 )
 
 type ManagedTransactionEventHandler struct {

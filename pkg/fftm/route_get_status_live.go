@@ -19,10 +19,10 @@ package fftm
 import (
 	"net/http"
 
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
 
-	"github.com/hyperledger/firefly-common/pkg/ffapi"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/common/pkg/ffapi"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
 )
 
 // deprecatedGetStatus deprecated, is present for backwards compatibility with the previous generation of connectors i.e. Ethconnect

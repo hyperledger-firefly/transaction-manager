@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
 )
 
 func (c *fftmClient) GetEventStreams(ctx context.Context) ([]apitypes.EventStream, error) {

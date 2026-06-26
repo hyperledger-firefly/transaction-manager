@@ -19,8 +19,8 @@ package fftm
 import (
 	"net/http"
 
-	"github.com/hyperledger/firefly-common/pkg/ffapi"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/common/pkg/ffapi"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
 )
 
 var deleteEventStream = func(m *manager) *ffapi.Route {

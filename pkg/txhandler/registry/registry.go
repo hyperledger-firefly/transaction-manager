@@ -19,11 +19,11 @@ package txhandlerfactory
 import (
 	"context"
 
-	"github.com/hyperledger/firefly-common/pkg/config"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmconfig"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/txhandler"
+	"github.com/hyperledger-firefly/common/pkg/config"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmconfig"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/txhandler"
 )
 
 var txHandlers = make(map[string]Factory)

@@ -22,12 +22,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs" // replace with your own messages if you are developing a customized transaction handler
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs" // replace with your own messages if you are developing a customized transaction handler
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 const metricsGaugeTransactionsInflightUsed = "tx_in_flight_used_total"
@@ -63,7 +63,7 @@ type policyEngineAPIResponse struct {
 
 func (sth *simpleTransactionHandler) policyLoop() {
 	defer close(sth.policyLoopDone)
-	ctx := log.WithLogField(sth.ctx, "role", "policyloop")
+	ctx := log.WithLogFields(sth.ctx, "role", "policyloop")
 	ticker := time.NewTicker(sth.policyLoopInterval)
 
 	for {

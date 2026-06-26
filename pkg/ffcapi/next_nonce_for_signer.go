@@ -17,7 +17,7 @@
 package ffcapi
 
 import (
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
 )
 
 // NextNonceForSignerRequest used to do a query for the next nonce to use for a

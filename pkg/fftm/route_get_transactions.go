@@ -20,10 +20,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/hyperledger/firefly-common/pkg/ffapi"
-	"github.com/hyperledger/firefly-transaction-manager/internal/persistence"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/common/pkg/ffapi"
+	"github.com/hyperledger-firefly/transaction-manager/internal/persistence"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
 )
 
 var getTransactions = func(m *manager) *ffapi.Route {

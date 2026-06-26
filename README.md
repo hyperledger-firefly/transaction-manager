@@ -1,4 +1,4 @@
-[![codecov](https://codecov.io/gh/hyperledger/firefly-transaction-manager/branch/main/graph/badge.svg?token=G6TaoNNBx9)](https://codecov.io/gh/hyperledger/firefly-transaction-manager) [![Go Reference](https://pkg.go.dev/badge/github.com/hyperledger/firefly-transaction-manager.svg)](https://pkg.go.dev/github.com/hyperledger/firefly-transaction-manager)
+[![codecov](https://codecov.io/gh/hyperledger-firefly/transaction-manager/branch/main/graph/badge.svg?token=G6TaoNNBx9)](https://codecov.io/gh/hyperledger-firefly/transaction-manager) [![Go Reference](https://pkg.go.dev/badge/github.com/hyperledger-firefly/transaction-manager.svg)](https://pkg.go.dev/github.com/hyperledger-firefly/transaction-manager)
 
 # Hyperledger FireFly Transaction Manager
 
@@ -87,7 +87,7 @@ multiple simple web/mobile wallets used against the same key), but it does not e
 ### Why "at source" nonce management was chosen vs. "at target"
 
 The "at source" approach to ordering used in FFTM could be compared with the "at target" allocation of nonces used in
-[EthConnect](https://github.com/hyperledger/firefly-ethconnect)).
+[EthConnect](https://github.com/hyperledger-firefly/ethconnect)).
 
 The "at target" approach optimizes for throughput and ability to send new transactions to the chain,
 with an at-least-once delivery assurance to the applications.
@@ -108,7 +108,7 @@ However, "at target" comes with two compromises that mean FFTM chose the "at sou
 A simple transaction handler can be found in [./pkg/txhandler/simple](./pkg/txhandler/simple). You can write your own transaction
 handler using [the transaction handler interface](./pkg/txhandler/txhandler.go).
 
-An example of how to plug in your handler, can be found [here](https://github.com/hyperledger/firefly-evmconnect/blob/a4b3b15dc4fa1ac93ad9f829d23e4574a4c71f01/cmd/evmconnect.go#L66)
+An example of how to plug in your handler, can be found [here](https://github.com/hyperledger-firefly/evmconnect/blob/a4b3b15dc4fa1ac93ad9f829d23e4574a4c71f01/cmd/evmconnect.go#L66)
 
 ## Event streaming
 

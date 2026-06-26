@@ -16,7 +16,7 @@
 
 package ffcapi
 
-import "github.com/hyperledger/firefly-common/pkg/fftypes"
+import "github.com/hyperledger-firefly/common/pkg/fftypes"
 
 type AddressBalanceRequest struct {
 	Address  string `json:"address"`

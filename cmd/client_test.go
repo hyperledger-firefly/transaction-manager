@@ -19,9 +19,9 @@ package cmd
 import (
 	"testing"
 
-	"github.com/hyperledger/firefly-common/pkg/config"
-	"github.com/hyperledger/firefly-common/pkg/fftls"
-	"github.com/hyperledger/firefly-transaction-manager/internal/apiclient"
+	"github.com/hyperledger-firefly/common/pkg/config"
+	"github.com/hyperledger-firefly/common/pkg/fftls"
+	"github.com/hyperledger-firefly/transaction-manager/internal/apiclient"
 	"github.com/stretchr/testify/assert"
 )
 

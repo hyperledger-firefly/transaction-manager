@@ -26,17 +26,17 @@ import (
 
 	sprig "github.com/Masterminds/sprig/v3"
 	resty "github.com/go-resty/resty/v2"
-	"github.com/hyperledger/firefly-common/pkg/config"
-	"github.com/hyperledger/firefly-common/pkg/ffresty"
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-common/pkg/retry"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmconfig" // shouldn't need this if you are developing a customized transaction handler
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"   // replace with your own messages if you are developing a customized transaction handler
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/txhandler"
+	"github.com/hyperledger-firefly/common/pkg/config"
+	"github.com/hyperledger-firefly/common/pkg/ffresty"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/common/pkg/retry"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmconfig" // shouldn't need this if you are developing a customized transaction handler
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"   // replace with your own messages if you are developing a customized transaction handler
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/txhandler"
 )
 
 const metricsCounterTransactionProcessOperationsTotal = "tx_process_operation_total"

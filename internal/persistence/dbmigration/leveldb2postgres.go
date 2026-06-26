@@ -20,11 +20,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-transaction-manager/internal/persistence/leveldb"
-	"github.com/hyperledger/firefly-transaction-manager/internal/persistence/postgres"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmconfig"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/transaction-manager/internal/persistence/leveldb"
+	"github.com/hyperledger-firefly/transaction-manager/internal/persistence/postgres"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmconfig"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
 )
 
 func MigrateLevelDBToPostgres(ctx context.Context) (err error) {

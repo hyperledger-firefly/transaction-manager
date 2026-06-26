@@ -19,7 +19,7 @@ package cmd
 import (
 	"context"
 
-	"github.com/hyperledger/firefly-transaction-manager/internal/persistence/dbmigration"
+	"github.com/hyperledger-firefly/transaction-manager/internal/persistence/dbmigration"
 	"github.com/spf13/cobra"
 )
 

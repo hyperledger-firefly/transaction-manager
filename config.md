@@ -332,6 +332,19 @@
 |password|Password|`string`|`<nil>`
 |username|Username|`string`|`<nil>`
 
+## policyengine.simple.gasOracle.dns
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|servers|An optional list of DNS server addresses (host or host:port, port defaults to 53) to use instead of the system resolver. Setting this forces use of Go's built-in DNS resolver.|`[]string`|`<nil>`
+|timeout|The dial timeout when contacting a configured DNS server|[`time.Duration`](https://pkg.go.dev/time#Duration)|`<nil>`
+
+## policyengine.simple.gasOracle.net
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|cidrDenylist|A list of CIDR ranges to which outbound connections are blocked, as a core SSRF mitigation. Empty by default.|`[]string`|`<nil>`
+
 ## policyengine.simple.gasOracle.proxy
 
 |Key|Description|Type|Default Value|
@@ -434,6 +447,19 @@
 |password|Password|`string`|`<nil>`
 |username|Username|`string`|`<nil>`
 
+## transactions.handler.simple.gasOracle.dns
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|servers|An optional list of DNS server addresses (host or host:port, port defaults to 53) to use instead of the system resolver. Setting this forces use of Go's built-in DNS resolver.|`[]string`|`<nil>`
+|timeout|The dial timeout when contacting a configured DNS server|[`time.Duration`](https://pkg.go.dev/time#Duration)|`<nil>`
+
+## transactions.handler.simple.gasOracle.net
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|cidrDenylist|A list of CIDR ranges to which outbound connections are blocked, as a core SSRF mitigation. Empty by default.|`[]string`|`<nil>`
+
 ## transactions.handler.simple.gasOracle.proxy
 
 |Key|Description|Type|Default Value|
@@ -502,6 +528,19 @@
 |---|-----------|----|-------------|
 |password|Password|`string`|`<nil>`
 |username|Username|`string`|`<nil>`
+
+## webhooks.dns
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|servers|An optional list of DNS server addresses (host or host:port, port defaults to 53) to use instead of the system resolver. Setting this forces use of Go's built-in DNS resolver.|`[]string`|`<nil>`
+|timeout|The dial timeout when contacting a configured DNS server|[`time.Duration`](https://pkg.go.dev/time#Duration)|`<nil>`
+
+## webhooks.net
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|cidrDenylist|A list of CIDR ranges to which outbound connections are blocked, as a core SSRF mitigation. Empty by default.|`[]string`|`<nil>`
 
 ## webhooks.proxy
 
