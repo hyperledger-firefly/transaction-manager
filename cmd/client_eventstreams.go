@@ -17,7 +17,7 @@
 package cmd
 
 import (
-	"github.com/hyperledger/firefly-transaction-manager/internal/apiclient"
+	"github.com/hyperledger-firefly/transaction-manager/internal/apiclient"
 	"github.com/spf13/cobra"
 )
 

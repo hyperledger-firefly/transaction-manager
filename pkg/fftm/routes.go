@@ -16,7 +16,7 @@
 
 package fftm
 
-import "github.com/hyperledger/firefly-common/pkg/ffapi"
+import "github.com/hyperledger-firefly/common/pkg/ffapi"
 
 func (m *manager) routes() []*ffapi.Route {
 	return []*ffapi.Route{

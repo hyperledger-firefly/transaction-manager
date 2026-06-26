@@ -19,7 +19,7 @@ package ffcapi
 import (
 	"context"
 
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
 )
 
 type EventStreamStartRequest struct {

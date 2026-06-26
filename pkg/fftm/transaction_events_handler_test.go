@@ -21,13 +21,13 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-transaction-manager/internal/confirmations"
-	"github.com/hyperledger/firefly-transaction-manager/mocks/confirmationsmocks"
-	"github.com/hyperledger/firefly-transaction-manager/mocks/txhandlermocks"
-	"github.com/hyperledger/firefly-transaction-manager/mocks/wsmocks"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/transaction-manager/internal/confirmations"
+	"github.com/hyperledger-firefly/transaction-manager/mocks/confirmationsmocks"
+	"github.com/hyperledger-firefly/transaction-manager/mocks/txhandlermocks"
+	"github.com/hyperledger-firefly/transaction-manager/mocks/wsmocks"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 	"github.com/stretchr/testify/mock"
 )
 

@@ -21,9 +21,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/hyperledger/firefly-transaction-manager/internal/ws"
-	"github.com/hyperledger/firefly-transaction-manager/mocks/wsmocks"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/internal/ws"
+	"github.com/hyperledger-firefly/transaction-manager/mocks/wsmocks"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
 	"github.com/stretchr/testify/assert"
 )
 

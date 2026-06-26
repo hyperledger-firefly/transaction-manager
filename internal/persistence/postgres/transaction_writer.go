@@ -24,15 +24,15 @@ import (
 
 	lru "github.com/hashicorp/golang-lru/v2"
 
-	"github.com/hyperledger/firefly-common/pkg/config"
-	"github.com/hyperledger/firefly-common/pkg/dbsql"
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-transaction-manager/internal/persistence"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/txhandler"
+	"github.com/hyperledger-firefly/common/pkg/config"
+	"github.com/hyperledger-firefly/common/pkg/dbsql"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/transaction-manager/internal/persistence"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/txhandler"
 )
 
 type transactionOperation struct {
@@ -185,7 +185,7 @@ func (tw *transactionWriter) queue(ctx context.Context, op *transactionOperation
 func (tw *transactionWriter) worker(i int) {
 	defer close(tw.workersDone[i])
 	workerID := fmt.Sprintf("tx_writer_%.4d", i)
-	ctx := log.WithLogField(tw.bgCtx, "job", workerID)
+	ctx := log.WithLogFields(tw.bgCtx, "job", workerID)
 	l := log.L(ctx)
 	var batch *transactionWriterBatch
 	batchCount := 0

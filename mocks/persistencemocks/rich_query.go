@@ -5,11 +5,11 @@ package persistencemocks
 import (
 	context "context"
 
-	apitypes "github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
+	apitypes "github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
 
-	ffapi "github.com/hyperledger/firefly-common/pkg/ffapi"
+	ffapi "github.com/hyperledger-firefly/common/pkg/ffapi"
 
-	fftypes "github.com/hyperledger/firefly-common/pkg/fftypes"
+	fftypes "github.com/hyperledger-firefly/common/pkg/fftypes"
 
 	mock "github.com/stretchr/testify/mock"
 )

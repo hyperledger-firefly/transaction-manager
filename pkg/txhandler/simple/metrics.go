@@ -19,7 +19,7 @@ package simple
 import (
 	"context"
 
-	"github.com/hyperledger/firefly-common/pkg/metric"
+	"github.com/hyperledger-firefly/common/pkg/metric"
 )
 
 func (sth *simpleTransactionHandler) initSimpleHandlerMetrics(ctx context.Context) {

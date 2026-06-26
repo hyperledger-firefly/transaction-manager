@@ -25,16 +25,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hyperledger/firefly-common/pkg/config"
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-common/pkg/retry"
-	"github.com/hyperledger/firefly-transaction-manager/internal/metrics"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmconfig"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/config"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/common/pkg/retry"
+	"github.com/hyperledger-firefly/transaction-manager/internal/metrics"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmconfig"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 // Manager listens to the blocks on the chain, and attributes confirmations to
@@ -133,7 +133,7 @@ func NewBlockConfirmationManager(baseContext context.Context, connector ffcapi.A
 	}
 	bcm.ctx, bcm.cancelFunc = context.WithCancel(baseContext)
 	// add a log context for this specific confirmation manager (as there are many within the )
-	bcm.ctx = log.WithLogField(bcm.ctx, "role", fmt.Sprintf("confirmations_%s", desc))
+	bcm.ctx = log.WithLogFields(bcm.ctx, "role", fmt.Sprintf("confirmations_%s", desc))
 	return bcm
 }
 

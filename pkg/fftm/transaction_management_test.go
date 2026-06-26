@@ -21,12 +21,12 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-transaction-manager/mocks/ffcapimocks"
-	"github.com/hyperledger/firefly-transaction-manager/mocks/persistencemocks"
-	"github.com/hyperledger/firefly-transaction-manager/mocks/txhandlermocks"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/transaction-manager/mocks/ffcapimocks"
+	"github.com/hyperledger-firefly/transaction-manager/mocks/persistencemocks"
+	"github.com/hyperledger-firefly/transaction-manager/mocks/txhandlermocks"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )

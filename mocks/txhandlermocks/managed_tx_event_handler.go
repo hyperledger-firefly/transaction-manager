@@ -5,7 +5,7 @@ package txhandlermocks
 import (
 	context "context"
 
-	apitypes "github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
+	apitypes "github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
 
 	mock "github.com/stretchr/testify/mock"
 )

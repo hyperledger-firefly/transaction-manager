@@ -20,7 +20,7 @@ import (
 	"crypto/rand"
 	"time"
 
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
 	ulid "github.com/oklog/ulid/v2"
 )
 

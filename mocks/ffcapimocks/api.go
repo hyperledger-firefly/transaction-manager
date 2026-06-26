@@ -5,7 +5,7 @@ package ffcapimocks
 import (
 	context "context"
 
-	ffcapi "github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	ffcapi "github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 	mock "github.com/stretchr/testify/mock"
 )
 

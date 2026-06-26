@@ -23,10 +23,10 @@ import (
 	"sync"
 
 	ws "github.com/gorilla/websocket"
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
 )
 
 type webSocketConnection struct {
@@ -58,7 +58,7 @@ type WebSocketCommandMessage struct {
 func newConnection(bgCtx context.Context, server *webSocketServer, conn *ws.Conn) *webSocketConnection {
 	id := fftypes.NewUUID().String()
 	wsc := &webSocketConnection{
-		ctx:       log.WithLogField(bgCtx, "wsc", id),
+		ctx:       log.WithLogFields(bgCtx, "wsc", id),
 		id:        id,
 		server:    server,
 		conn:      conn,

@@ -19,8 +19,8 @@ package fftm
 import (
 	"context"
 
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/apitypes"
 )
 
 func (m *manager) getLiveStatus(ctx context.Context) (resp *apitypes.LiveStatus, err error) {

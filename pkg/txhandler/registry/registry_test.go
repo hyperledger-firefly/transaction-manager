@@ -20,8 +20,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmconfig"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/txhandler/simple"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmconfig"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/txhandler/simple"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )

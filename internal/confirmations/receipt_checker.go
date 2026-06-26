@@ -22,11 +22,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hyperledger/firefly-common/pkg/i18n"
-	"github.com/hyperledger/firefly-common/pkg/log"
-	"github.com/hyperledger/firefly-transaction-manager/internal/metrics"
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmmsgs"
-	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
+	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
+	"github.com/hyperledger-firefly/transaction-manager/internal/metrics"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmmsgs"
+	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
 // receiptChecker asynchronously checks for receipts. It does not have a limited
@@ -89,7 +89,7 @@ func (rc *receiptChecker) waitNext() (p *pendingItem) {
 
 func (rc *receiptChecker) run(i int) {
 	defer close(rc.workersDone[i])
-	ctx := log.WithLogField(rc.bcm.ctx, "job", fmt.Sprintf("receiptchecker_%.3d", i))
+	ctx := log.WithLogFields(rc.bcm.ctx, "job", fmt.Sprintf("receiptchecker_%.3d", i))
 	for {
 		// We use the back-off retry handling of the retry loop to avoid tight loops,
 		// but in the case of errors we re-queue the individual item to the back of the

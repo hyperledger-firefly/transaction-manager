@@ -20,7 +20,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/hyperledger/firefly-transaction-manager/internal/tmconfig"
+	"github.com/hyperledger-firefly/transaction-manager/internal/tmconfig"
 	"github.com/stretchr/testify/assert"
 )
 

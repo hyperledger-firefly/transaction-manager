@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/hyperledger/firefly-common/pkg/fftypes"
+	"github.com/hyperledger-firefly/common/pkg/fftypes"
 )
 
 // API is the interface to the blockchain specific connector, from the FFTM server and policy engine.

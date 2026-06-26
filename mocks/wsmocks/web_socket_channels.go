@@ -3,7 +3,7 @@
 package wsmocks
 
 import (
-	ws "github.com/hyperledger/firefly-transaction-manager/internal/ws"
+	ws "github.com/hyperledger-firefly/transaction-manager/internal/ws"
 	mock "github.com/stretchr/testify/mock"
 )
 
