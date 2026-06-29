@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: golang:1.26.4-bookworm
+    container: golang:1.26.0-bookworm
     defaults:
       run:
         shell: bash # needed for codecov
