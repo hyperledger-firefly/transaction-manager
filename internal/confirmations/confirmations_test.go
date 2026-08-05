@@ -1276,7 +1276,7 @@ func TestCheckReceiptImmediateConfirm(t *testing.T) {
 		},
 	}
 	blocks := bcm.newBlockState()
-	go bcm.dispatchReceipt(pending, receipt, blocks)
+	go bcm.dispatchReceipt(pending, receipt, 1, blocks)
 
 	<-done
 }
@@ -1306,7 +1306,47 @@ func TestCheckReceiptWalkFail(t *testing.T) {
 		},
 	}
 	blocks := bcm.newBlockState()
-	bcm.dispatchReceipt(pending, receipt, blocks)
+	bcm.dispatchReceipt(pending, receipt, 1, blocks)
+}
+
+func TestDispatchReceiptIgnoresStaleGeneration(t *testing.T) {
+
+	bcm, mca := newTestBlockConfirmationManager()
+	mca.On("BlockInfoByNumber", mock.Anything, mock.MatchedBy(func(r *ffcapi.BlockInfoByNumberRequest) bool {
+		return r.BlockNumber.Uint64() == 1002
+	})).Return(nil, ffcapi.ErrorReasonNotFound, fmt.Errorf("not found"))
+
+	forkA := &ffcapi.TransactionReceiptResponse{
+		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
+			BlockNumber: fftypes.NewFFBigInt(1001),
+			BlockHash:   "0xea681fadcf56ee6254a0d30b255c56636ee9199c73c45f0dd5823759b2ad1ef8",
+		},
+	}
+	forkB := &ffcapi.TransactionReceiptResponse{
+		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
+			BlockNumber: fftypes.NewFFBigInt(1001),
+			BlockHash:   "0x33eb56730878a08e126f2d52b19242d3b3127dc7611447255928be91b2dda455",
+		},
+	}
+
+	txHash := "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+	pending := &pendingItem{
+		pType:           pendingTypeTransaction,
+		transactionHash: txHash,
+	}
+	blocks := bcm.newBlockState()
+
+	// Newer receipt applied first (as can happen when receiptArrived notifications arrive out of order).
+	bcm.dispatchReceipt(pending, forkB, 2, blocks)
+	assert.Equal(t, forkB.BlockHash, pending.blockHash)
+	assert.Equal(t, uint64(2), pending.appliedReceiptGeneration)
+
+	// Older in-flight receipt must not overwrite the newer one.
+	bcm.dispatchReceipt(pending, forkA, 1, blocks)
+	assert.Equal(t, forkB.BlockHash, pending.blockHash)
+	assert.Equal(t, uint64(2), pending.appliedReceiptGeneration)
+
+	mca.AssertExpectations(t)
 }
 
 func TestScheduleReceiptCheck(t *testing.T) {

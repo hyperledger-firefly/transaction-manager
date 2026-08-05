@@ -62,12 +62,13 @@ const (
 )
 
 type Notification struct {
-	NotificationType NotificationType
-	Event            *EventInfo                         // NewEventLog, RemovedEventLog
-	Transaction      *TransactionInfo                   // NewTransaction, RemovedTransaction
-	RemovedListener  *RemovedListenerInfo               // ListenerRemoved
-	pending          *pendingItem                       // receiptArrived
-	receipt          *ffcapi.TransactionReceiptResponse // receiptArrived
+	NotificationType  NotificationType
+	Event             *EventInfo                         // NewEventLog, RemovedEventLog
+	Transaction       *TransactionInfo                   // NewTransaction, RemovedTransaction
+	RemovedListener   *RemovedListenerInfo               // ListenerRemoved
+	pending           *pendingItem                       // receiptArrived
+	receipt           *ffcapi.TransactionReceiptResponse // receiptArrived
+	receiptGeneration uint64                             // receiptArrived
 }
 
 type EventInfo struct {
@@ -156,6 +157,8 @@ type pendingItem struct {
 	previousConfirmationCount *uint64       // headBlockNumber mode: last dispatched CurrentConfirmationCount
 	queuedStale               *list.Element // protected by receiptChecker mux
 	lastReceiptCheck          time.Time     // protected by receiptChecker mux
+	receiptGeneration         uint64        // protected by receiptChecker mux, incremented on each schedule
+	appliedReceiptGeneration  uint64        // last receipt generation applied by confirmationsListener
 	receiptCallback           func(ctx context.Context, receipt *ffcapi.TransactionReceiptResponse)
 	confirmationsCallback     func(ctx context.Context, notification *apitypes.ConfirmationsNotification)
 	transactionHash           string
@@ -511,7 +514,7 @@ func (bcm *blockConfirmationManager) processNotifications(notifications []*Notif
 		case RemovedTransaction:
 			bcm.removeItem(n.transactionPendingItem(), true)
 		case receiptArrived:
-			bcm.dispatchReceipt(n.pending, n.receipt, blocks)
+			bcm.dispatchReceipt(n.pending, n.receipt, n.receiptGeneration, blocks)
 		default:
 			// Note that streamStopped is handled in the polling loop directly
 			log.L(bcm.ctx).Warnf("Unexpected notification type: %s", n.NotificationType)
@@ -523,7 +526,17 @@ func (bcm *blockConfirmationManager) processNotifications(notifications []*Notif
 	return notifications[:0], nil
 }
 
-func (bcm *blockConfirmationManager) dispatchReceipt(pending *pendingItem, receipt *ffcapi.TransactionReceiptResponse, blocks *blockState) {
+// NOTE: there is no locking in this function
+// relies on the consumer logic to not call this function concurrently
+func (bcm *blockConfirmationManager) dispatchReceipt(pending *pendingItem, receipt *ffcapi.TransactionReceiptResponse, receiptGeneration uint64, blocks *blockState) {
+	if receiptGeneration > 0 && receiptGeneration <= pending.appliedReceiptGeneration {
+		log.L(bcm.ctx).Debugf("Ignoring stale receipt for transaction %s (actual_generation=%d applied_generation=%d)",
+			pending.transactionHash, receiptGeneration, pending.appliedReceiptGeneration)
+		return
+	}
+	if receiptGeneration > 0 {
+		pending.appliedReceiptGeneration = receiptGeneration
+	}
 	pending.blockNumber = receipt.BlockNumber.Uint64()
 	pending.blockHash = receipt.BlockHash
 	log.L(bcm.ctx).Infof("Receipt for transaction %s downloaded. BlockNumber=%d BlockHash=%s", pending.transactionHash, pending.blockNumber, pending.blockHash)
