@@ -2038,6 +2038,7 @@ func TestSkipEventsBehindCheckpointAndUnknownListener(t *testing.T) {
 	li := &listener{
 		spec:       &apitypes.Listener{ID: listenerID, Name: strPtr("listener1")},
 		checkpoint: &utCheckpointType{SomeSequenceNumber: 2000},
+		started:    true,
 	}
 	es.listeners[*li.spec.ID] = li
 
@@ -2088,7 +2089,8 @@ func TestHWMCheckpointAfterInactivity(t *testing.T) {
 	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
 
 	li := &listener{
-		spec: &apitypes.Listener{ID: fftypes.NewUUID()},
+		spec:    &apitypes.Listener{ID: fftypes.NewUUID()},
+		started: true,
 	}
 
 	mcm := &confirmationsmocks.Manager{}
@@ -2133,7 +2135,8 @@ func TestHWMCheckpointInFlightSkip(t *testing.T) {
 	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
 
 	li := &listener{
-		spec: &apitypes.Listener{ID: fftypes.NewUUID()},
+		spec:    &apitypes.Listener{ID: fftypes.NewUUID()},
+		started: true,
 	}
 
 	mcm := &confirmationsmocks.Manager{}
@@ -2146,7 +2149,9 @@ func TestHWMCheckpointInFlightSkip(t *testing.T) {
 
 	msp := es.checkpointsDB.(*persistencemocks.Persistence)
 	msp.On("WriteCheckpoint", mock.Anything, mock.MatchedBy(func(cp *apitypes.EventStreamCheckpoint) bool {
-		return cp.StreamID.Equals(es.spec.ID) && string(cp.Listeners[*li.spec.ID]) == `null`
+		// A listener that has never checkpointed must have no entry persisted at all (not a "null" entry)
+		_, hasEntry := cp.Listeners[*li.spec.ID]
+		return cp.StreamID.Equals(es.spec.ID) && !hasEntry
 	})).Return(nil)
 
 	es.checkpointInterval = 1 * time.Microsecond
@@ -2170,7 +2175,8 @@ func TestHWMCheckpointFail(t *testing.T) {
 	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
 
 	li := &listener{
-		spec: &apitypes.Listener{ID: fftypes.NewUUID()},
+		spec:    &apitypes.Listener{ID: fftypes.NewUUID()},
+		started: true,
 	}
 
 	mcm := &confirmationsmocks.Manager{}
@@ -2188,7 +2194,9 @@ func TestHWMCheckpointFail(t *testing.T) {
 
 	msp := es.checkpointsDB.(*persistencemocks.Persistence)
 	msp.On("WriteCheckpoint", mock.Anything, mock.MatchedBy(func(cp *apitypes.EventStreamCheckpoint) bool {
-		return cp.StreamID.Equals(es.spec.ID) && string(cp.Listeners[*li.spec.ID]) == `null`
+		// A listener that has never checkpointed must have no entry persisted at all (not a "null" entry)
+		_, hasEntry := cp.Listeners[*li.spec.ID]
+		return cp.StreamID.Equals(es.spec.ID) && !hasEntry
 	})).Return(nil)
 
 	es.checkpointInterval = 1 * time.Microsecond
@@ -2198,6 +2206,181 @@ func TestHWMCheckpointFail(t *testing.T) {
 	mfc.AssertExpectations(t)
 	msp.AssertExpectations(t)
 	mcm.AssertExpectations(t)
+}
+
+func TestHWMCheckpointNotPersistedDuringCatchup(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+	defer ss.cancelCtx()
+
+	li := &listener{
+		spec:    &apitypes.Listener{ID: fftypes.NewUUID()},
+		started: true,
+	}
+
+	mcm := &confirmationsmocks.Manager{}
+	mcm.On("CheckInFlight", li.spec.ID).Return(false)
+	es.confirmations = mcm
+	es.confirmationsRequired = 1
+	es.listeners[*li.spec.ID] = li
+
+	// Make the catchup long-running, to drive the warning path as well
+	es.checkpointInterval = 1 * time.Microsecond
+	catchupStart := fftypes.FFTime(time.Now().Add(-1 * time.Hour))
+	li.catchupReportedSince = &catchupStart
+
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerHWM", mock.Anything, mock.MatchedBy(func(req *ffcapi.EventListenerHWMRequest) bool {
+		return req.StreamID.Equals(es.spec.ID) && req.ListenerID.Equals(li.spec.ID)
+	})).Return(&ffcapi.EventListenerHWMResponse{
+		Checkpoint: &utCheckpointType{SomeSequenceNumber: 12345},
+		Catchup:    true, // the HWM is not yet a safe resume point
+	}, ffcapi.ErrorReason(""), nil).Once()
+
+	// While the connector reports catchup, the returned HWM must not be taken as a checkpoint,
+	// and nothing must be persisted for the listener
+	cp := es.generateCheckpoint(ss, nil)
+	assert.Nil(t, li.checkpoint)
+	_, hasEntry := cp.Listeners[*li.spec.ID]
+	assert.False(t, hasEntry)
+	assert.NotNil(t, li.catchupReportedSince)
+
+	// Once catchup completes, the checkpoint is taken and persisted
+	mfc.On("EventListenerHWM", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerHWMResponse{
+		Checkpoint: &utCheckpointType{SomeSequenceNumber: 23456},
+		Catchup:    false,
+	}, ffcapi.ErrorReason(""), nil).Once()
+
+	cp = es.generateCheckpoint(ss, nil)
+	assert.Equal(t, &utCheckpointType{SomeSequenceNumber: 23456}, li.checkpoint)
+	assert.JSONEq(t, `{"someSequenceNumber":23456}`, string(cp.Listeners[*li.spec.ID]))
+	assert.Nil(t, li.catchupReportedSince)
+
+	mfc.AssertExpectations(t)
+	mcm.AssertExpectations(t)
+}
+
+func TestCheckpointRoundTripNeverCheckpointedListener(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+	defer ss.cancelCtx()
+
+	li := &listener{
+		es: es,
+		spec: &apitypes.Listener{
+			ID:        apitypes.NewULID(),
+			Name:      strPtr("ut_listener"),
+			FromBlock: strPtr("0"),
+		},
+		started: true,
+	}
+
+	mcm := &confirmationsmocks.Manager{}
+	mcm.On("CheckInFlight", li.spec.ID).Return(false)
+	es.confirmations = mcm
+	es.confirmationsRequired = 1
+	es.listeners[*li.spec.ID] = li
+
+	// The connector cannot supply a HWM checkpoint
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerHWM", mock.Anything, mock.Anything).Return(nil, ffcapi.ErrorReason(""), fmt.Errorf("pop"))
+
+	// The generated checkpoint must carry no entry for the listener at all
+	cp := es.generateCheckpoint(ss, nil)
+	_, hasEntry := cp.Listeners[*li.spec.ID]
+	assert.False(t, hasEntry)
+
+	// So on restart, no checkpoint is passed to the connector, and it initializes from fromBlock
+	req := li.buildAddRequest(context.Background(), cp)
+	assert.Nil(t, req.Checkpoint)
+
+	// A legacy "null" entry written by an older version must be treated the same as no checkpoint,
+	// rather than being passed to the connector as a zero-valued checkpoint
+	cp.Listeners[*li.spec.ID] = json.RawMessage(`null`)
+	req = li.buildAddRequest(context.Background(), cp)
+	assert.Nil(t, req.Checkpoint)
+
+	// Same for a block listener - where prior to this check a "null" entry unmarshalled to a
+	// zero-valued (non-nil) checkpoint at block zero
+	blSpec := &apitypes.Listener{
+		ID:        apitypes.NewULID(),
+		Name:      strPtr("ut_block_listener"),
+		Type:      &apitypes.ListenerTypeBlocks,
+		FromBlock: strPtr(ffcapi.FromBlockLatest),
+	}
+	bl := &listener{es: es, spec: blSpec}
+	blar := bl.buildBlockAddRequest(context.Background(), &apitypes.EventStreamCheckpoint{
+		Listeners: apitypes.CheckpointListeners{
+			*blSpec.ID: json.RawMessage(`null`),
+		},
+	})
+	assert.Nil(t, blar.Checkpoint)
+}
+
+func TestNoHWMCheckpointForNotYetStartedListener(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+	defer ss.cancelCtx()
+
+	// The listener is visible in the map, but the connector has not yet accepted it
+	// (EventListenerAdd has not returned) - as happens in AddOrUpdateListener between
+	// lockedListenerUpdate and l.start
+	li := &listener{
+		es: es,
+		spec: &apitypes.Listener{
+			ID:        apitypes.NewULID(),
+			Name:      strPtr("ut_listener"),
+			FromBlock: strPtr("0"),
+		},
+	}
+
+	mcm := &confirmationsmocks.Manager{}
+	es.confirmations = mcm
+	es.confirmationsRequired = 1
+	es.listeners[*li.spec.ID] = li
+
+	// Note no EventListenerHWM (or CheckInFlight) expectations - a checkpoint cycle must not
+	// query the connector for a listener it does not know about yet
+	mfc := es.connector.(*ffcapimocks.API)
+	cp := es.generateCheckpoint(ss, nil)
+	_, hasEntry := cp.Listeners[*li.spec.ID]
+	assert.False(t, hasEntry)
+	mfc.AssertNotCalled(t, "EventListenerHWM", mock.Anything, mock.Anything)
+
+	// A successful EventListenerAdd (via l.start) marks it started
+	mfc.On("EventListenerAdd", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerAddResponse{}, ffcapi.ErrorReason(""), nil).Once()
+	err := li.start(ss, nil)
+	assert.NoError(t, err)
+	assert.True(t, li.started)
+
+	// And a listener stop marks it not started again
+	mfc.On("EventListenerRemove", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerRemoveResponse{}, ffcapi.ErrorReason(""), nil).Once()
+	err = li.stop(ss)
+	assert.NoError(t, err)
+	assert.False(t, li.started)
+
+	// A failed EventListenerAdd must not mark it started
+	mfc.On("EventListenerAdd", mock.Anything, mock.Anything).Return(nil, ffcapi.ErrorReason(""), fmt.Errorf("pop")).Once()
+	err = li.start(ss, nil)
+	assert.Error(t, err)
+	assert.False(t, li.started)
+
+	mfc.AssertExpectations(t)
 }
 
 func TestCheckConfirmedEventForBatchIgnoreInvalid(t *testing.T) {

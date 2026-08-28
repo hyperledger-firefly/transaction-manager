@@ -26,11 +26,17 @@ import (
 	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
+// catchupCheckpointWarnIntervals is the number of checkpoint intervals a listener can continuously
+// report catchup (during which its checkpoint is deliberately not advanced) before we warn.
+const catchupCheckpointWarnIntervals = 5
+
 type listener struct {
-	es             *eventStream
-	spec           *apitypes.Listener
-	lastCheckpoint *fftypes.FFTime
-	checkpoint     ffcapi.EventListenerCheckpoint
+	es                   *eventStream
+	spec                 *apitypes.Listener
+	lastCheckpoint       *fftypes.FFTime
+	checkpoint           ffcapi.EventListenerCheckpoint
+	started              bool            // protected by es.mux - set only once the connector has accepted the listener, so we never query/persist a checkpoint for a listener the connector does not know
+	catchupReportedSince *fftypes.FFTime // protected by es.mux - set while the connector continuously reports the listener in catchup
 }
 
 type blockListenerAddRequest struct {
@@ -49,7 +55,14 @@ func listenerSpecToOptions(spec *apitypes.Listener) ffcapi.EventListenerOptions 
 	}
 }
 
+func (l *listener) markStarted(started bool) {
+	l.es.mux.Lock()
+	l.started = started
+	l.es.mux.Unlock()
+}
+
 func (l *listener) stop(startedState *startedStreamState) (err error) {
+	l.markStarted(false)
 	if l.spec.Type != nil && *l.spec.Type == apitypes.ListenerTypeBlocks {
 		err = l.es.confirmations.StopConfirmedBlockListener(startedState.ctx, l.spec.ID)
 	} else {
@@ -62,6 +75,14 @@ func (l *listener) stop(startedState *startedStreamState) (err error) {
 	return
 }
 
+// checkpointAvailable checks a persisted checkpoint entry is usable. Older versions persisted a
+// literal JSON "null" entry for listeners that had never checkpointed - passing that to the connector
+// (rather than no checkpoint at all) can result in a zero-valued checkpoint that overrides the
+// listener's configured fromBlock, so it must be treated the same as no checkpoint.
+func checkpointAvailable(jsonCP json.RawMessage) bool {
+	return jsonCP != nil && string(jsonCP) != "null"
+}
+
 func (l *listener) buildAddRequest(ctx context.Context, cp *apitypes.EventStreamCheckpoint) *ffcapi.EventListenerAddRequest {
 	req := &ffcapi.EventListenerAddRequest{
 		EventListenerOptions: listenerSpecToOptions(l.spec),
@@ -71,7 +92,7 @@ func (l *listener) buildAddRequest(ctx context.Context, cp *apitypes.EventStream
 	}
 	if cp != nil {
 		jsonCP := cp.Listeners[*l.spec.ID]
-		if jsonCP != nil {
+		if checkpointAvailable(jsonCP) {
 			listenerCheckpoint := l.es.connector.EventStreamNewCheckpointStruct()
 			err := json.Unmarshal(jsonCP, &listenerCheckpoint)
 			if err != nil {
@@ -93,7 +114,7 @@ func (l *listener) buildBlockAddRequest(ctx context.Context, cp *apitypes.EventS
 	}
 	if cp != nil {
 		jsonCP := cp.Listeners[*l.spec.ID]
-		if jsonCP != nil {
+		if checkpointAvailable(jsonCP) {
 			var listenerCheckpoint ffcapi.BlockListenerCheckpoint
 			err := json.Unmarshal(jsonCP, &listenerCheckpoint)
 			if err != nil {
@@ -108,5 +129,8 @@ func (l *listener) buildBlockAddRequest(ctx context.Context, cp *apitypes.EventS
 
 func (l *listener) start(startedState *startedStreamState, cp *apitypes.EventStreamCheckpoint) error {
 	_, _, err := l.es.connector.EventListenerAdd(startedState.ctx, l.buildAddRequest(startedState.ctx, cp))
+	if err == nil {
+		l.markStarted(true)
+	}
 	return err
 }

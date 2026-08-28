@@ -27,5 +27,5 @@ type EventListenerHWMRequest struct {
 
 type EventListenerHWMResponse struct {
 	Checkpoint EventListenerCheckpoint `json:"checkpoint"`
-	Catchup    bool                    `json:"catchup,omitempty"` // informational only - informs an operator that the stream is catching up
+	Catchup    bool                    `json:"catchup,omitempty"` // connectors MUST set this whenever the returned checkpoint is not yet a safe resume point - such as while the listener (or the stream head group) is catching up and the high watermark is still moving to reflect the listener's configured fromBlock. While set, the framework will not persist the returned checkpoint.
 }

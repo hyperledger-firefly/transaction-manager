@@ -470,7 +470,11 @@ func (es *eventStream) AddOrUpdateListener(ctx context.Context, id *fftypes.UUID
 		}
 	} else if isNew && startedState != nil {
 		if l.spec.Type != nil && *l.spec.Type == apitypes.ListenerTypeBlocks {
-			return spec, l.es.confirmations.StartConfirmedBlockListener(ctx, l.spec.ID, *l.spec.FromBlock, nil /* new so no checkpoint */, es.batchChannel)
+			err := l.es.confirmations.StartConfirmedBlockListener(ctx, l.spec.ID, *l.spec.FromBlock, nil /* new so no checkpoint */, es.batchChannel)
+			if err == nil {
+				l.markStarted(true)
+			}
+			return spec, err
 		}
 		// Start the new listener - no checkpoint needed here
 		return spec, l.start(startedState, nil)
@@ -616,6 +620,14 @@ func (es *eventStream) start(ctx context.Context, apiManagedCheckpoint *apitypes
 		return nil, err
 	}
 
+	// The connector now has all the event listeners - mark them started so the checkpoint
+	// loop knows it is safe to query/persist checkpoints for them (note we hold es.mux)
+	for _, l := range es.listeners {
+		if l.spec.Type == nil || *l.spec.Type != apitypes.ListenerTypeBlocks {
+			l.started = true
+		}
+	}
+
 	// Kick off the loops
 	go es.eventLoop(startedState)
 	if !es.apiManagedStream {
@@ -632,6 +644,9 @@ func (es *eventStream) start(ctx context.Context, apiManagedCheckpoint *apitypes
 			// There are no known reasons for this to fail, as we're starting a fresh set of listeners
 			log.L(startedState.ctx).Errorf("Failed to start block listener: %s", err)
 			return nil, err
+		}
+		if l := es.listeners[*bl.ListenerID]; l != nil {
+			l.started = true // note we hold es.mux
 		}
 	}
 
@@ -698,6 +713,10 @@ func (es *eventStream) Stop(ctx context.Context) error {
 	es.mux.Lock()
 	es.currentState = nil
 	defer es.mux.Unlock()
+	// The connector no longer has any of our listeners - they will be re-added on the next start
+	for _, l := range es.listeners {
+		l.started = false
+	}
 	return es.checkSetStatus(ctx, apitypes.EventStreamStatusStopping, apitypes.EventStreamStatusStopped)
 }
 
@@ -1059,7 +1078,24 @@ func (es *eventStream) checkUpdateHWMCheckpoint(ctx context.Context, l *listener
 			log.L(ctx).Errorf("Failed to obtain high watermark checkpoint for listener '%s': %s", l.spec.ID, err)
 			return checkpoint
 		}
+		if res.Catchup {
+			// While the connector reports the listener in catchup, the high watermark is a moving value that
+			// might not yet reflect the fromBlock the listener was configured with. Persisting it could pin
+			// the listener ahead of blocks it has not yet scanned, so we keep the existing checkpoint.
+			log.L(ctx).Infof("Stale checkpoint for listener '%s' will not be updated as the listener is catching up", l.spec.ID)
+			es.mux.Lock()
+			if l.catchupReportedSince == nil {
+				l.catchupReportedSince = fftypes.Now()
+			}
+			catchupDuration := time.Since(*l.catchupReportedSince.Time())
+			es.mux.Unlock()
+			if catchupDuration > time.Duration(catchupCheckpointWarnIntervals)*es.checkpointInterval {
+				log.L(ctx).Warnf("Listener '%s' has reported catchup continuously for %.2fs - its checkpoint is not being advanced", l.spec.ID, catchupDuration.Seconds())
+			}
+			return checkpoint
+		}
 		es.mux.Lock()
+		l.catchupReportedSince = nil
 		if l.checkpoint == checkpoint /* double check it hasn't changed */ {
 			checkpoint = res.Checkpoint
 			l.checkpoint = checkpoint
@@ -1093,7 +1129,17 @@ func (es *eventStream) generateCheckpoint(startedState *startedStreamState, batc
 	}
 	staleCheckpoints := make([]*listener, 0)
 	for lID, l := range es.listeners {
-		cp.Listeners[lID], _ = json.Marshal(l.checkpoint)
+		if !l.started {
+			// The connector has not yet accepted this listener - do not query it for a checkpoint,
+			// and do not persist an entry for it (it must restart from its configured fromBlock)
+			continue
+		}
+		if l.checkpoint != nil {
+			// Note we deliberately do not write an entry for a listener that has never checkpointed -
+			// a literal "null" entry would be passed back to the connector on restart as a zero-valued
+			// checkpoint, overriding the listener's configured fromBlock
+			cp.Listeners[lID], _ = json.Marshal(l.checkpoint)
+		}
 		if l.checkpoint == nil || l.lastCheckpoint == nil || time.Since(*l.lastCheckpoint.Time()) > es.checkpointInterval {
 			staleCheckpoints = append(staleCheckpoints, l)
 		}
@@ -1102,8 +1148,10 @@ func (es *eventStream) generateCheckpoint(startedState *startedStreamState, batc
 
 	// Ask the connector for any updated high watermark checkpoints - checking we don't have any in-flight confirmations
 	for _, l := range staleCheckpoints {
-		cpb, _ := json.Marshal(es.checkUpdateHWMCheckpoint(startedState.ctx, l))
-		cp.Listeners[*l.spec.ID] = cpb
+		if updatedCheckpoint := es.checkUpdateHWMCheckpoint(startedState.ctx, l); updatedCheckpoint != nil {
+			cpb, _ := json.Marshal(updatedCheckpoint)
+			cp.Listeners[*l.spec.ID] = cpb
+		}
 	}
 	return cp
 }
