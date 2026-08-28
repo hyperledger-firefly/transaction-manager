@@ -31,6 +31,7 @@ type listener struct {
 	spec           *apitypes.Listener
 	lastCheckpoint *fftypes.FFTime
 	checkpoint     ffcapi.EventListenerCheckpoint
+	started        bool // protected by es.mux - set only once the connector has accepted the listener, so we never query the connector for a listener it does not know
 }
 
 type blockListenerAddRequest struct {
@@ -49,7 +50,14 @@ func listenerSpecToOptions(spec *apitypes.Listener) ffcapi.EventListenerOptions 
 	}
 }
 
+func (l *listener) markStarted(started bool) {
+	l.es.mux.Lock()
+	l.started = started
+	l.es.mux.Unlock()
+}
+
 func (l *listener) stop(startedState *startedStreamState) (err error) {
+	l.markStarted(false)
 	if l.spec.Type != nil && *l.spec.Type == apitypes.ListenerTypeBlocks {
 		err = l.es.confirmations.StopConfirmedBlockListener(startedState.ctx, l.spec.ID)
 	} else {
@@ -62,6 +70,10 @@ func (l *listener) stop(startedState *startedStreamState) (err error) {
 	return
 }
 
+func notNull(jsonCP json.RawMessage) bool {
+	return jsonCP != nil && string(jsonCP) != "null"
+}
+
 func (l *listener) buildAddRequest(ctx context.Context, cp *apitypes.EventStreamCheckpoint) *ffcapi.EventListenerAddRequest {
 	req := &ffcapi.EventListenerAddRequest{
 		EventListenerOptions: listenerSpecToOptions(l.spec),
@@ -71,7 +83,7 @@ func (l *listener) buildAddRequest(ctx context.Context, cp *apitypes.EventStream
 	}
 	if cp != nil {
 		jsonCP := cp.Listeners[*l.spec.ID]
-		if jsonCP != nil {
+		if notNull(jsonCP) /* guard against previously persisted null values */ {
 			listenerCheckpoint := l.es.connector.EventStreamNewCheckpointStruct()
 			err := json.Unmarshal(jsonCP, &listenerCheckpoint)
 			if err != nil {
@@ -93,7 +105,7 @@ func (l *listener) buildBlockAddRequest(ctx context.Context, cp *apitypes.EventS
 	}
 	if cp != nil {
 		jsonCP := cp.Listeners[*l.spec.ID]
-		if jsonCP != nil {
+		if notNull(jsonCP) {
 			var listenerCheckpoint ffcapi.BlockListenerCheckpoint
 			err := json.Unmarshal(jsonCP, &listenerCheckpoint)
 			if err != nil {
@@ -108,5 +120,8 @@ func (l *listener) buildBlockAddRequest(ctx context.Context, cp *apitypes.EventS
 
 func (l *listener) start(startedState *startedStreamState, cp *apitypes.EventStreamCheckpoint) error {
 	_, _, err := l.es.connector.EventListenerAdd(startedState.ctx, l.buildAddRequest(startedState.ctx, cp))
+	if err == nil {
+		l.markStarted(true)
+	}
 	return err
 }
