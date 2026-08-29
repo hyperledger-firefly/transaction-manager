@@ -101,8 +101,9 @@ type manager struct {
 	toolkit   *txhandler.Toolkit
 
 	mux                      sync.Mutex
-	eventStreams             map[fftypes.UUID]events.Stream
+	eventStreams             map[fftypes.UUID]events.ManagedStream
 	streamsByName            map[string]*fftypes.UUID
+	listenersByName          map[string]*fftypes.UUID
 	apiStreamsByName         map[string]*fftypes.UUID
 	blockListenerDone        chan struct{}
 	txHandlerDone            <-chan struct{}
@@ -138,8 +139,9 @@ func newManager(ctx context.Context, connector ffcapi.API) *manager {
 		monitoringServerDone:     make(chan error),
 		deprecatedMetricsEnabled: config.GetBool(tmconfig.DeprecatedMetricsEnabled),
 		monitoringEnabled:        config.GetBool(tmconfig.MonitoringEnabled),
-		eventStreams:             make(map[fftypes.UUID]events.Stream),
+		eventStreams:             make(map[fftypes.UUID]events.ManagedStream),
 		streamsByName:            make(map[string]*fftypes.UUID),
+		listenersByName:          make(map[string]*fftypes.UUID),
 		apiStreamsByName:         make(map[string]*fftypes.UUID),
 		metricsManager:           metrics.NewMetricsManager(ctx),
 	}

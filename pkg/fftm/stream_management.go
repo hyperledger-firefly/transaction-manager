@@ -56,9 +56,12 @@ func (m *manager) restoreStreams() error {
 			// check to see if it's already started
 			if _, ok := m.eventStreams[*def.ID]; !ok {
 				closeoutName, err := m.reserveStreamName(m.ctx, *def.Name, def.ID)
-				var s events.Stream
+				var s events.ManagedStream
 				if err == nil {
 					s, err = m.addRuntimeStream(def, streamListeners)
+				}
+				if err == nil {
+					m.restoreListenerNames(streamListeners)
 				}
 				if err == nil && !*def.Suspended {
 					err = s.Start(m.ctx)
@@ -71,6 +74,26 @@ func (m *manager) restoreStreams() error {
 		}
 	}
 	return nil
+}
+
+// restoreListenerNames populates the listener name index from persisted data.
+// LevelDB edge case is covered, where due to no hard index in LevelDB (unlike PSQL)
+// we could theoretically have a duplicate. So we handle with a log and the first one wins.
+func (m *manager) restoreListenerNames(listeners []*apitypes.Listener) {
+	m.mux.Lock()
+	defer m.mux.Unlock()
+	for _, l := range listeners {
+		if l.Name == nil || *l.Name == "" {
+			continue
+		}
+		if existing := m.listenersByName[*l.Name]; existing != nil && !existing.Equals(l.ID) {
+			log.L(m.ctx).Warnf("Duplicate listener name '%s' in persistence (listeners %s and %s). "+
+				"The name remains indexed against %s, so creating or renaming to it will be rejected.",
+				*l.Name, existing, l.ID, existing)
+			continue
+		}
+		m.listenersByName[*l.Name] = l.ID
+	}
 }
 
 func (m *manager) deleteAllStreamListeners(ctx context.Context, streamID *fftypes.UUID) error {
@@ -87,12 +110,18 @@ func (m *manager) deleteAllStreamListeners(ctx context.Context, streamID *fftype
 			if err := m.persistence.DeleteListener(ctx, def.ID); err != nil {
 				return err
 			}
+			// Only release the name once the row is definitely gone
+			if def.Name != nil {
+				m.mux.Lock()
+				m.releaseListenerName(*def.Name, def.ID)
+				m.mux.Unlock()
+			}
 		}
 	}
 	return nil
 }
 
-func (m *manager) addRuntimeStream(def *apitypes.EventStream, listeners []*apitypes.Listener) (events.Stream, error) {
+func (m *manager) addRuntimeStream(def *apitypes.EventStream, listeners []*apitypes.Listener) (events.ManagedStream, error) {
 	s, err := events.NewEventStream(m.ctx, def, m.connector, m.persistence, m.wsServer, listeners, m.metricsManager)
 	if err != nil {
 		return nil, err
@@ -158,6 +187,37 @@ func (m *manager) reserveStreamName(ctx context.Context, name string, id *fftype
 	}, nil
 }
 
+// reserveListenerName allocates a name to an ID, including handling the rename case.
+// The caller must commit/rollback the reservation using the supplied function.
+func (m *manager) reserveListenerName(ctx context.Context, name string, id *fftypes.UUID, prevName *string) (func(bool), error) {
+	m.mux.Lock()
+	defer m.mux.Unlock()
+
+	existing := m.listenersByName[name]
+	if existing != nil && !existing.Equals(id) {
+		return nil, i18n.NewError(ctx, tmmsgs.MsgDuplicateListenerName, name, existing)
+	}
+	m.listenersByName[name] = id
+
+	return func(succeeded bool) {
+		m.mux.Lock()
+		defer m.mux.Unlock()
+		switch {
+		case !succeeded && existing == nil:
+			m.releaseListenerName(name, id) // give back if we didn't already have it
+		case succeeded && prevName != nil && *prevName != name:
+			m.releaseListenerName(*prevName, id) // free up the old name
+		}
+	}, nil
+}
+
+// releaseListenerName frees a name, if held by the ID passed
+func (m *manager) releaseListenerName(name string, id *fftypes.UUID) {
+	if cur := m.listenersByName[name]; cur.Equals(id) {
+		delete(m.listenersByName, name)
+	}
+}
+
 func (m *manager) GetAPIManagedEventStream(spec *apitypes.EventStream, listeners []*apitypes.Listener) (isNew bool, es eventapi.EventStream, err error) {
 	m.mux.Lock()
 	defer m.mux.Unlock()
@@ -170,18 +230,18 @@ func (m *manager) GetAPIManagedEventStream(spec *apitypes.EventStream, listeners
 	def := *spec
 	def.ID = m.apiStreamsByName[*def.Name]
 	if def.ID != nil {
-		es = m.eventStreams[*def.ID]
-	}
-	if es != nil {
-		return isNew, es, nil
+		if existing := m.eventStreams[*def.ID]; existing != nil {
+			return isNew, existing, nil
+		}
 	}
 	def.ID = fftypes.NewUUID()
 
 	log.L(m.ctx).Infof("Creating API managed event stream %s", *def.Name)
-	es, err = events.NewAPIManagedEventStream(m.ctx, &def, m.connector, listeners, m.metricsManager)
+	ms, err := events.NewAPIManagedEventStream(m.ctx, &def, m.connector, listeners, m.metricsManager)
 	if err == nil {
 		isNew = true
-		m.eventStreams[*def.ID] = es
+		es = ms
+		m.eventStreams[*def.ID] = ms
 		m.apiStreamsByName[*def.Name] = def.ID
 		log.L(m.ctx).Infof("Created API managed event stream %s (%s)", *def.Name, def.ID)
 	}
@@ -250,7 +310,7 @@ func (m *manager) CreateAndStoreNewStreamListener(ctx context.Context, idStr str
 }
 
 func (m *manager) createAndStoreNewListener(ctx context.Context, def *apitypes.Listener) (*apitypes.Listener, error) {
-	return m.createOrUpdateListener(ctx, apitypes.NewULID(), def, false)
+	return m.createOrUpdateListener(ctx, apitypes.NewULID(), nil /* new, so no name held today */, def, false)
 }
 
 func (m *manager) UpdateExistingListener(ctx context.Context, streamIDStr, listenerIDStr string, updates *apitypes.Listener, reset bool) (*apitypes.Listener, error) {
@@ -259,14 +319,14 @@ func (m *manager) UpdateExistingListener(ctx context.Context, streamIDStr, liste
 		return nil, err
 	}
 	updates.StreamID = l.StreamID
-	return m.createOrUpdateListener(ctx, l.ID, updates, reset)
+	return m.createOrUpdateListener(ctx, l.ID, l.Name, updates, reset)
 }
 
-func (m *manager) createOrUpdateListener(ctx context.Context, id *fftypes.UUID, newOrUpdates *apitypes.Listener, reset bool) (*apitypes.Listener, error) {
+func (m *manager) createOrUpdateListener(ctx context.Context, id *fftypes.UUID, prevName *string, newOrUpdates *apitypes.Listener, reset bool) (*apitypes.Listener, error) {
 	if err := mergeEthCompatMethods(ctx, newOrUpdates); err != nil {
 		return nil, err
 	}
-	var s events.Stream
+	var s events.ManagedStream
 	if newOrUpdates.StreamID != nil {
 		m.mux.Lock()
 		s = m.eventStreams[*newOrUpdates.StreamID]
@@ -275,16 +335,42 @@ func (m *manager) createOrUpdateListener(ctx context.Context, id *fftypes.UUID, 
 	if s == nil {
 		return nil, i18n.NewError(ctx, tmmsgs.MsgStreamNotFound, newOrUpdates.StreamID)
 	}
-	def, err := s.AddOrUpdateListener(ctx, id, newOrUpdates, reset)
+
+	// Verify and resolve the spec first (including setting the default name)
+	spec, err := s.VerifyListenerOptions(ctx, id, newOrUpdates)
 	if err != nil {
 		return nil, err
 	}
-	if err := m.persistence.WriteListener(ctx, def); err != nil {
-		err1 := s.RemoveListener(ctx, def.ID)
-		log.L(ctx).Infof("Cleaned up runtime listener after write failed (err?=%v)", err1)
+
+	// Reserve the name BEFORE any runtime or connector work, so that when two parallel creates
+	// race on the same name the loser returns a clean conflict without ever having reached
+	// connector.EventListenerAdd
+	written := false
+	if spec.Name != nil && *spec.Name != "" {
+		closeoutName, err := m.reserveListenerName(ctx, *spec.Name, spec.ID, prevName)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { closeoutName(written) }()
+	}
+
+	// Prepare the update - gives us a fully validated/prepared in-memory update to apply after DB work
+	u, err := s.PrepareListenerUpdate(ctx, spec, reset)
+	if err != nil {
 		return nil, err
 	}
-	return def, nil
+
+	// Do the DB persistence - which includes a global uniqueness check on name in PSQL
+	if err := m.persistence.WriteListener(ctx, u.Spec); err != nil {
+		return nil, err
+	}
+	written = true
+
+	// Complete the update - this is where the reset actually happens if requested
+	if err := u.Apply(ctx); err != nil {
+		return nil, err
+	}
+	return u.Spec, nil
 }
 
 func (m *manager) DeleteListener(ctx context.Context, streamIDStr, listenerIDStr string) error {
@@ -301,7 +387,16 @@ func (m *manager) DeleteListener(ctx context.Context, streamIDStr, listenerIDStr
 	if err := s.RemoveListener(ctx, spec.ID); err != nil {
 		return err
 	}
-	return m.persistence.DeleteListener(ctx, spec.ID)
+	if err := m.persistence.DeleteListener(ctx, spec.ID); err != nil {
+		return err
+	}
+	// Only release the name once the row is definitely gone
+	if spec.Name != nil {
+		m.mux.Lock()
+		m.releaseListenerName(*spec.Name, spec.ID)
+		m.mux.Unlock()
+	}
+	return nil
 }
 
 func (m *manager) UpdateStream(ctx context.Context, idStr string, updates *apitypes.EventStream) (*apitypes.EventStream, error) {

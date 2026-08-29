@@ -2468,3 +2468,148 @@ func TestStartAPIEventStreamPollContextCancelled(t *testing.T) {
 	require.Regexp(t, "FF00154", err)
 
 }
+
+// Check in the two-stage verify+apply, the original listener stays in-place until the Apply() completes
+func TestPrepareListenerUpdateInvisibleUntilApply(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{
+		ResolvedSignature: "sig1",
+	}, ffcapi.ErrorReason(""), nil)
+	initialListeners := make(chan int, 10)
+	mfc.On("EventStreamStart", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		initialListeners <- len(args[1].(*ffcapi.EventStreamStartRequest).InitialListeners)
+	}).Return(&ffcapi.EventStreamStartResponse{}, ffcapi.ErrorReason(""), nil)
+	added := make(chan *fftypes.UUID, 1)
+	mfc.On("EventListenerAdd", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		added <- args[1].(*ffcapi.EventListenerAddRequest).ListenerID
+	}).Return(nil, ffcapi.ErrorReason(""), nil)
+	mfc.On("EventStreamStopped", mock.Anything, mock.Anything).Return(&ffcapi.EventStreamStoppedResponse{}, ffcapi.ErrorReason(""), nil).Maybe()
+
+	msp := es.checkpointsDB.(*persistencemocks.Persistence)
+	msp.On("GetCheckpoint", mock.Anything, mock.Anything).Return(nil, nil)
+
+	require.NoError(t, es.Start(es.bgCtx))
+	assert.Equal(t, 0, <-initialListeners)
+
+	lID := fftypes.NewUUID()
+	spec, err := es.VerifyListenerOptions(es.bgCtx, lID, &apitypes.Listener{
+		Name:    strPtr("ut_listener"),
+		Filters: []fftypes.JSONAny{`{"event":"definition1"}`},
+	})
+	require.NoError(t, err)
+	u, err := es.PrepareListenerUpdate(es.bgCtx, spec, false)
+	require.NoError(t, err)
+
+	// The stream does not know about the listener yet
+	es.mux.Lock()
+	_, exists := es.listeners[*lID]
+	es.mux.Unlock()
+	assert.False(t, exists)
+
+	// ... so a restart in the window cannot register it with the connector
+	require.NoError(t, es.Stop(es.bgCtx))
+	require.NoError(t, es.Start(es.bgCtx))
+	assert.Equal(t, 0, <-initialListeners)
+
+	// Applying is what makes it real
+	require.NoError(t, u.Apply(es.bgCtx))
+	assert.Equal(t, lID, <-added)
+	es.mux.Lock()
+	l, exists := es.listeners[*lID]
+	assert.True(t, l.started)
+	es.mux.Unlock()
+	require.True(t, exists)
+
+	require.NoError(t, es.Stop(es.bgCtx))
+}
+
+func TestPrepareListenerUpdateExistingUnchangedUntilApply(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{
+		ResolvedSignature: "sig1",
+	}, ffcapi.ErrorReason(""), nil)
+	// An update must never remove the listener it is updating
+	mfc.On("EventListenerRemove", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		assert.Fail(t, "listener must not be removed by an update")
+	}).Return(&ffcapi.EventListenerRemoveResponse{}, ffcapi.ErrorReason(""), nil).Maybe()
+
+	lID := fftypes.NewUUID()
+	original, err := es.VerifyListenerOptions(es.bgCtx, lID, &apitypes.Listener{
+		Name:    strPtr("name1"),
+		Filters: []fftypes.JSONAny{`{"event":"definition1"}`},
+	})
+	require.NoError(t, err)
+	u, err := es.PrepareListenerUpdate(es.bgCtx, original, false)
+	require.NoError(t, err)
+	require.NoError(t, u.Apply(es.bgCtx))
+
+	updated, err := es.VerifyListenerOptions(es.bgCtx, lID, &apitypes.Listener{
+		Name: strPtr("name2"),
+	})
+	require.NoError(t, err)
+	u, err = es.PrepareListenerUpdate(es.bgCtx, updated, false)
+	require.NoError(t, err)
+
+	// The listener is still on its previous spec until the caller applies
+	es.mux.Lock()
+	l := es.listeners[*lID]
+	es.mux.Unlock()
+	assert.Same(t, original, l.spec)
+
+	require.NoError(t, u.Apply(es.bgCtx))
+	es.mux.Lock()
+	l, exists := es.listeners[*lID]
+	es.mux.Unlock()
+	require.True(t, exists)
+	assert.Same(t, updated, l.spec)
+}
+
+func TestApplyListenerUpdateRemovedWhilePersisting(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{
+		ResolvedSignature: "sig1",
+	}, ffcapi.ErrorReason(""), nil)
+
+	msp := es.checkpointsDB.(*persistencemocks.Persistence)
+	msp.On("GetCheckpoint", mock.Anything, mock.Anything).Return(nil, nil)
+
+	lID := fftypes.NewUUID()
+	spec, err := es.VerifyListenerOptions(es.bgCtx, lID, &apitypes.Listener{
+		Name:    strPtr("name1"),
+		Filters: []fftypes.JSONAny{`{"event":"definition1"}`},
+	})
+	require.NoError(t, err)
+	u, err := es.PrepareListenerUpdate(es.bgCtx, spec, false)
+	require.NoError(t, err)
+	require.NoError(t, u.Apply(es.bgCtx))
+
+	// A reset prepared against a listener that is removed before we apply. The caller has written
+	// the spec by this point, so the right answer is to end up matching it, not to fail.
+	u, err = es.PrepareListenerUpdate(es.bgCtx, spec, true)
+	require.NoError(t, err)
+	es.mux.Lock()
+	delete(es.listeners, *lID)
+	es.mux.Unlock()
+	require.NoError(t, u.Apply(es.bgCtx))
+
+	es.mux.Lock()
+	l, exists := es.listeners[*lID]
+	es.mux.Unlock()
+	require.True(t, exists)
+	assert.Same(t, spec, l.spec)
+}

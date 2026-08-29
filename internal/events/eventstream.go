@@ -44,6 +44,29 @@ import (
 
 type Stream = eventapi.EventStream
 
+// ManagedStream extends the connector-facing stream interface with the extra functions FFTM's
+// manager needs - which cannot be added to pkg/eventapi without breaking connectors.
+type ManagedStream interface {
+	Stream
+
+	// VerifyListenerOptions is used in create/update to verify and resolve the full spec
+	// including the Name, which defaults to the resolved signature
+	VerifyListenerOptions(ctx context.Context, id *fftypes.UUID, updatesOrNew *apitypes.Listener) (*apitypes.Listener, error)
+
+	// PrepareListenerUpdate checks a spec previously returned by VerifyListenerOptions against the
+	// current state of the stream, without changing anything. The caller persists the returned
+	// Spec, then calls Apply() to make the update live.
+	PrepareListenerUpdate(ctx context.Context, spec *apitypes.Listener, reset bool) (*PreparedListenerUpdate, error)
+}
+
+// PreparedListenerUpdate is a listener create/update that has been validated against a stream, but
+// not yet applied.  This allows the change to be persisted to the database after prepare, before apply.
+type PreparedListenerUpdate struct {
+	Spec  *apitypes.Listener // new/updated spec fully validated
+	es    *eventStream
+	reset bool
+}
+
 // esDefaults are the defaults for new event streams, read from the config once in InitDefaults()
 var esDefaults struct {
 	initialized               bool
@@ -123,7 +146,7 @@ func NewEventStream(
 	wsChannels ws.WebSocketChannels,
 	initialListeners []*apitypes.Listener,
 	eme metrics.EventMetricsEmitter,
-) (ees Stream, err error) {
+) (ees ManagedStream, err error) {
 	return newEventStream(
 		bgCtx,
 		persistedSpec,
@@ -141,7 +164,7 @@ func NewAPIManagedEventStream(
 	connector ffcapi.API,
 	listeners []*apitypes.Listener,
 	eme metrics.EventMetricsEmitter,
-) (ees Stream, err error) {
+) (ees ManagedStream, err error) {
 	return newEventStream(
 		bgCtx,
 		persistedSpec,
@@ -162,7 +185,7 @@ func newEventStream(
 	wsChannels ws.WebSocketChannels,
 	initialListeners []*apitypes.Listener,
 	eme metrics.EventMetricsEmitter,
-) (ees Stream, err error) {
+) (ees ManagedStream, err error) {
 	esCtx := log.WithLogFields(bgCtx, "eventstream", spec.ID.String())
 	es := &eventStream{
 		bgCtx:                 esCtx,
@@ -185,7 +208,7 @@ func newEventStream(
 	}
 	es.batchChannel = make(chan *ffcapi.ListenerEvent, *es.spec.BatchSize)
 	for _, existing := range initialListeners {
-		spec, err := es.verifyListenerOptions(esCtx, existing.ID, existing)
+		spec, err := es.VerifyListenerOptions(esCtx, existing.ID, existing)
 		if err != nil {
 			return nil, err
 		}
@@ -395,7 +418,7 @@ func (es *eventStream) mergeListenerOptions(id *fftypes.UUID, updates *apitypes.
 
 }
 
-func (es *eventStream) verifyListenerOptions(ctx context.Context, id *fftypes.UUID, updatesOrNew *apitypes.Listener) (*apitypes.Listener, error) {
+func (es *eventStream) VerifyListenerOptions(ctx context.Context, id *fftypes.UUID, updatesOrNew *apitypes.Listener) (*apitypes.Listener, error) {
 	if id == nil {
 		return nil, i18n.NewError(ctx, tmmsgs.MsgMissingID)
 	}
@@ -437,49 +460,91 @@ func (es *eventStream) verifyListenerOptions(ctx context.Context, id *fftypes.UU
 	return spec, nil
 }
 
+// AddOrUpdateListener resolves and applies a listener in one step.
+// Note this is only used externally.
+// The FFTM manager needs to coordinate DB work to persist the change
+// between VerifyListenerOptions and PrepareListenerUpdate.
 func (es *eventStream) AddOrUpdateListener(ctx context.Context, id *fftypes.UUID, updates *apitypes.Listener, reset bool) (merged *apitypes.Listener, err error) {
-	log.L(ctx).Infof("Adding/updating listener %s", id)
-
 	// Ask the connector to verify the options, and apply defaults
-	spec, err := es.verifyListenerOptions(ctx, id, updates)
+	spec, err := es.VerifyListenerOptions(ctx, id, updates)
 	if err != nil {
 		return nil, err
+	}
+	u, err := es.PrepareListenerUpdate(ctx, spec, reset)
+	if err != nil {
+		return nil, err
+	}
+	if err := u.Apply(ctx); err != nil {
+		return nil, err
+	}
+	return u.Spec, nil
+}
+
+// PrepareListenerUpdate checks that a resolved spec is, and returns an update ready to Apply().
+func (es *eventStream) PrepareListenerUpdate(ctx context.Context, spec *apitypes.Listener, reset bool) (*PreparedListenerUpdate, error) {
+	log.L(ctx).Infof("Preparing listener %s", spec.ID)
+
+	es.mux.Lock()
+	defer es.mux.Unlock()
+
+	l, exists := es.listeners[*spec.ID]
+	switch {
+	case exists:
+		if spec.SignatureString() != l.spec.SignatureString() {
+			// We do not allow the filters to be updated, because that would lead to a confusing situation
+			// where the previously emitted events are a subset/mismatch to the filters configured now.
+			return nil, i18n.NewError(ctx, tmmsgs.MsgFilterUpdateNotAllowed, l.spec.SignatureString(), spec.SignatureString())
+		}
+	case reset:
+		return nil, i18n.NewError(ctx, tmmsgs.MsgResetStreamNotFound, spec.ID, es.spec.ID)
 	}
 
-	// Do the locked part - which checks if this is a new listener, or just an update to the options.
-	isNew, l, startedState, err := es.lockedListenerUpdate(ctx, spec, reset)
-	if err != nil {
-		return nil, err
-	}
-	if reset {
+	return &PreparedListenerUpdate{
+		Spec:  spec,
+		es:    es,
+		reset: reset,
+	}, nil
+}
+
+// Apply finalizes the update so this new version is the one in the in-memory map of listeners
+// for the stream, and resetting the checkpoint if required.
+func (u *PreparedListenerUpdate) Apply(ctx context.Context) error {
+	es := u.es
+
+	// Update the map to apply this version of the spec (new or updated based on the state at apply)
+	l, isNew, startedState := es.lockedListenerUpdate(u.Spec)
+	log.L(ctx).Infof("Applied listener %s (new=%t, reset=%t)", u.Spec.ID, isNew, u.reset)
+
+	switch {
+	case u.reset:
 		// Only safe to do the reset with the event stream stopped
 		if startedState != nil {
 			if err := es.Stop(ctx); err != nil {
-				return nil, err
+				return err
 			}
 		}
 		// Clear out the checkpoint for this listener
 		if err := es.resetListenerCheckpoint(ctx, l); err != nil {
-			return nil, err
+			return err
 		}
 		// Restart if we were started
 		if startedState != nil {
 			if err := es.Start(ctx); err != nil {
-				return nil, err
+				return err
 			}
 		}
-	} else if isNew && startedState != nil {
+	case isNew && startedState != nil:
 		if l.spec.Type != nil && *l.spec.Type == apitypes.ListenerTypeBlocks {
 			err := l.es.confirmations.StartConfirmedBlockListener(ctx, l.spec.ID, *l.spec.FromBlock, nil /* new so no checkpoint */, es.batchChannel)
 			if err == nil {
 				l.markStarted(true)
 			}
-			return spec, err
+			return err
 		}
 		// Start the new listener - no checkpoint needed here
-		return spec, l.start(startedState, nil)
+		return l.start(startedState, nil)
 	}
-	return spec, nil
+	return nil
 }
 
 func (es *eventStream) resetListenerCheckpoint(ctx context.Context, l *listener) error {
@@ -493,30 +558,24 @@ func (es *eventStream) resetListenerCheckpoint(ctx context.Context, l *listener)
 	return es.checkpointsDB.WriteCheckpoint(ctx, cp)
 }
 
-func (es *eventStream) lockedListenerUpdate(ctx context.Context, spec *apitypes.Listener, reset bool) (bool, *listener, *startedStreamState, error) {
+// lockedListenerUpdate adds the listener to the stream, or swaps the spec of the existing one,
+// returning it along with the started state read in the same lock hold - so the caller starts it
+// against the state it was actually added to.
+func (es *eventStream) lockedListenerUpdate(spec *apitypes.Listener) (l *listener, isNew bool, startedState *startedStreamState) {
 	es.mux.Lock()
 	defer es.mux.Unlock()
 
 	l, exists := es.listeners[*spec.ID]
-	switch {
-	case exists:
-		if spec.SignatureString() != l.spec.SignatureString() {
-			// We do not allow the filters to be updated, because that would lead to a confusing situation
-			// where the previously emitted events are a subset/mismatch to the filters configured now.
-			return false, nil, nil, i18n.NewError(ctx, tmmsgs.MsgFilterUpdateNotAllowed, l.spec.SignatureString(), spec.SignatureString())
-		}
+	if exists {
 		l.spec = spec
-	case reset:
-		return false, nil, nil, i18n.NewError(ctx, tmmsgs.MsgResetStreamNotFound, spec.ID, es.spec.ID)
-	default:
+	} else {
 		l = &listener{
 			es:   es,
 			spec: spec,
 		}
 		es.listeners[*spec.ID] = l
 	}
-	// Take a copy of the current started status, before unlocking
-	return !exists, l, es.currentState, nil
+	return l, !exists, es.currentState
 }
 
 func (es *eventStream) RemoveListener(ctx context.Context, id *fftypes.UUID) (err error) {
