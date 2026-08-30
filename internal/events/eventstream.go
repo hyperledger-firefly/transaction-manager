@@ -549,6 +549,7 @@ func (u *PreparedListenerUpdate) Apply(ctx context.Context) error {
 
 func (es *eventStream) resetListenerCheckpoint(ctx context.Context, l *listener) error {
 	l.checkpoint = nil
+	l.checkpointSource = checkpointSourceEvent
 	l.lastCheckpoint = nil
 	cp, err := es.checkpointsDB.GetCheckpoint(ctx, es.spec.ID)
 	if err != nil || cp == nil {
@@ -873,6 +874,17 @@ func (es *eventStream) eventLoop(startedState *startedStreamState) {
 	}
 }
 
+func (es *eventStream) getListenerWithCheckpoint(listenerID *fftypes.UUID) (l *listener, currentCheckpoint ffcapi.EventListenerCheckpoint, cpSource checkpointSource) {
+	es.mux.Lock()
+	defer es.mux.Unlock()
+	l = es.listeners[*listenerID]
+	if l != nil {
+		currentCheckpoint = l.checkpoint
+		cpSource = l.checkpointSource
+	}
+	return
+}
+
 func (es *eventStream) checkConfirmedEventForBatch(e *ffcapi.ListenerEvent) (l *listener, ewc *apitypes.EventWithContext) {
 	var eToLog fmt.Stringer
 	var listenerID *fftypes.UUID
@@ -887,23 +899,28 @@ func (es *eventStream) checkConfirmedEventForBatch(e *ffcapi.ListenerEvent) (l *
 		log.L(es.bgCtx).Errorf("Invalid event cannot be dispatched: %+v", e)
 		return nil, nil
 	}
-	es.mux.Lock()
-	l = es.listeners[*listenerID]
-	es.mux.Unlock()
+	l, currentCheckpoint, cpSource := es.getListenerWithCheckpoint(listenerID)
 	if l == nil {
 		log.L(es.bgCtx).Warnf("Confirmed event not associated with any active listener: %s", eToLog)
 		return nil, nil
 	}
-	currentCheckpoint := l.checkpoint
 	if currentCheckpoint != nil && !currentCheckpoint.LessThan(e.Checkpoint) {
-		// This event is behind the current checkpoint - this is a re-detection.
-		// We're perfectly happy to accept re-detections from the connector, as it can be
-		// very efficient to batch operations between listeners that cause re-detections.
-		// However, we need to protect the application from receiving the re-detections.
-		// This loop is the right place for this check, as we are responsible for writing the checkpoints and
-		// delivering to the application. So we are the one source of truth.
-		log.L(es.bgCtx).Debugf("%s '%s' event re-detected behind checkpoint: %s", l.spec.ID, l.spec.SignatureString(), eToLog)
-		return nil, nil
+		if cpSource == checkpointSourceHWM {
+			// The checkpoint holding this event back is the connector's scan position, not the position
+			// of an event the receiver acked. So it does not tell us we already delivered this one, and
+			// we cannot tell a re-detection apart from an event emitted before, but arriving after, we
+			// applied that scan position.
+			// Unsafe to assume this is a re-detection, so we deliver.
+			log.L(es.bgCtx).Warnf("%s '%s' event behind high water mark checkpoint %+v - delivering rather than discarding: %s", l.spec.ID, l.spec.SignatureString(), currentCheckpoint, eToLog)
+		} else {
+			// This event is behind the position of an event the receiver acked, so we know we already
+			// delivered it - this is a re-detection.
+			// We're perfectly happy to accept re-detections from the connector, as it can be
+			// very efficient to batch operations between listeners that cause re-detections.
+			// However, we protect the application from receiving the re-detections in this case.
+			log.L(es.bgCtx).Debugf("%s '%s' event re-detected behind checkpoint: %s", l.spec.ID, l.spec.SignatureString(), eToLog)
+			return nil, nil
+		}
 	}
 	if e.Event != nil {
 		ewc = &apitypes.EventWithContext{
@@ -1119,35 +1136,59 @@ func (es *eventStream) checkUpdateHWMCheckpoint(ctx context.Context, l *listener
 
 	checkpoint := l.checkpoint
 
-	inFlight := false
-	if es.confirmationsRequired > 0 {
-		inFlight = es.confirmations.CheckInFlight(l.spec.ID)
+	// We first ask the connector for their view of the checkpoint for this stream, and then
+	// check against our state to determine if it's safe to apply.
+	res, _, err := es.connector.EventListenerHWM(ctx, &ffcapi.EventListenerHWMRequest{
+		StreamID:   es.spec.ID,
+		ListenerID: l.spec.ID,
+	})
+	if err != nil {
+		log.L(ctx).Errorf("Failed to obtain high watermark checkpoint for listener '%s': %s", l.spec.ID, err)
+		return checkpoint
 	}
 
-	// If there's in-flight messages in the confirmation manager, we wait for these to be confirmed or purged before
-	// writing a checkpoint.
-	if inFlight {
-		log.L(ctx).Infof("Stale checkpoint for listener '%s' will not be updated as events are in-flight", l.spec.ID)
-	} else {
-		res, _, err := es.connector.EventListenerHWM(ctx, &ffcapi.EventListenerHWMRequest{
-			StreamID:   es.spec.ID,
-			ListenerID: l.spec.ID,
-		})
-		if err != nil {
-			log.L(ctx).Errorf("Failed to obtain high watermark checkpoint for listener '%s': %s", l.spec.ID, err)
-			return checkpoint
-		}
-		es.mux.Lock()
-		if l.checkpoint == checkpoint /* double check it hasn't changed */ {
-			checkpoint = res.Checkpoint
-			l.checkpoint = checkpoint
-			l.lastCheckpoint = fftypes.Now()
-		}
-		es.mux.Unlock()
+	es.mux.Lock()
+	defer es.mux.Unlock()
+
+	// Factor in in-flight deliveries (whether waiting for confirmations, or ack from the app)
+	// when determining if the connectors updated checkpoint is safe to apply.
+	if !es.lockedHWMSafeToApply(ctx, l, res) {
+		return checkpoint
+	}
+
+	if l.checkpoint == checkpoint /* double check it hasn't changed */ {
+		checkpoint = res.Checkpoint
+		l.checkpoint = checkpoint
+		l.checkpointSource = checkpointSourceHWM
+		l.lastCheckpoint = fftypes.Now()
 	}
 
 	return checkpoint
 
+}
+
+func (es *eventStream) lockedHWMSafeToApply(ctx context.Context, l *listener, res *ffcapi.EventListenerHWMResponse) bool {
+	if res.LastDetected != nil {
+		// If l.checkpoint (the point we've committed to already based on acks and earlier HWM)
+		// is below the last detection point, it's not safe to move it forwards.
+		// We're waiting for the next ack to arrive (or LastDetected to change on the connector side).
+		if l.checkpoint == nil || l.checkpoint.LessThan(res.LastDetected) {
+			log.L(ctx).Debugf("Stale checkpoint for listener '%s' will not be updated - connector has detected to %+v, we have committed to %+v",
+				l.spec.ID, res.LastDetected, l.checkpoint)
+			return false
+		}
+		return true
+	}
+	// No detection point reported. Either the connector does not implement it, or it has detected
+	// nothing yet for this listener. For example during a long catchup scan that has not matched anything.
+	// Note: for a connector that doesn't implement LastDetected, an event still inside FFTM can end up
+	//       behind a high water mark we applied. We can't distinguish that from a re-detection, so
+	//       checkConfirmedEventForBatch fails safe and redelivers rather than discarding.
+	if es.confirmations.CheckInFlight(l.spec.ID) {
+		log.L(ctx).Debugf("Stale checkpoint for listener '%s' will not be updated as events are in-flight", l.spec.ID)
+		return false
+	}
+	return true
 }
 
 func (es *eventStream) generateCheckpoint(startedState *startedStreamState, batch *eventStreamBatch) *apitypes.EventStreamCheckpoint {
@@ -1164,6 +1205,7 @@ func (es *eventStream) generateCheckpoint(startedState *startedStreamState, batc
 		for lID, lCP := range batch.checkpoints {
 			if l, ok := es.listeners[lID]; ok {
 				l.checkpoint = lCP
+				l.checkpointSource = checkpointSourceEvent // this is the position of an event the receiver has acked
 				l.lastCheckpoint = startedState.lastCheckpoint
 				log.L(es.bgCtx).Tracef("%s (%s) checkpoint: %+v", l.spec.SignatureString(), l.spec.ID, lCP)
 			}
@@ -1176,8 +1218,11 @@ func (es *eventStream) generateCheckpoint(startedState *startedStreamState, batc
 			cp.Listeners[lID], _ = json.Marshal(l.checkpoint)
 		}
 		// Add all started listeners with non-existent or stale checkpoints to the stale list,
-		// which we query below after we've dropped the lock
-		if l.started && (l.checkpoint == nil || l.lastCheckpoint == nil || time.Since(*l.lastCheckpoint.Time()) > es.checkpointInterval) {
+		// which we query below after we've dropped the lock.
+		// Block listeners are excluded - they are handled entirely inside our own confirmation manager,
+		// are never passed to the connector, and their checkpoint advances with every block event.
+		isBlockListener := l.spec.Type != nil && *l.spec.Type == apitypes.ListenerTypeBlocks
+		if l.started && !isBlockListener && (l.checkpoint == nil || l.lastCheckpoint == nil || time.Since(*l.lastCheckpoint.Time()) > es.checkpointInterval) {
 			staleCheckpoints = append(staleCheckpoints, l)
 		}
 	}

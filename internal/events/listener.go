@@ -26,12 +26,22 @@ import (
 	"github.com/hyperledger-firefly/transaction-manager/pkg/ffcapi"
 )
 
+// checkpointSource records which of the two routes set a listener's checkpoint.
+// Matters when an event turns up behind that checkpoint - see checkConfirmedEventForBatch.
+type checkpointSource int
+
+const (
+	checkpointSourceEvent checkpointSource = iota // an event we delivered and the receiver acked
+	checkpointSourceHWM                           // from the connector's scan position
+)
+
 type listener struct {
-	es             *eventStream
-	spec           *apitypes.Listener
-	lastCheckpoint *fftypes.FFTime
-	checkpoint     ffcapi.EventListenerCheckpoint
-	started        bool // protected by es.mux - set only once the connector has accepted the listener, so we never query the connector for a listener it does not know
+	es               *eventStream
+	spec             *apitypes.Listener
+	lastCheckpoint   *fftypes.FFTime
+	checkpoint       ffcapi.EventListenerCheckpoint
+	started          bool             // protected by es.mux - set only once the connector has accepted the listener, so we never query the connector for a listener it does not know
+	checkpointSource checkpointSource // protected by es.mux
 }
 
 type blockListenerAddRequest struct {
