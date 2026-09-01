@@ -23,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/hyperledger-firefly/common/pkg/ffapi"
 	"github.com/hyperledger-firefly/common/pkg/fftypes"
@@ -751,6 +752,62 @@ func TestCreateListenerVerifyOptionsFail(t *testing.T) {
 	assert.Nil(t, m.listenersByName["L1"])
 	assert.Equal(t, int32(0), counts.listenerAdd.Load())
 	assert.Equal(t, int32(0), counts.writeListener.Load())
+}
+
+func TestDeleteListenerSerializedAgainstUpdate(t *testing.T) {
+	_, m, done := newTestManagerMockPersistence(t)
+	defer done()
+
+	es, counts := testStreamWithListenerMocks(t, m)
+	mp := m.persistence.(*persistencemocks.Persistence)
+
+	l1, err := m.createAndStoreNewListener(m.ctx, &apitypes.Listener{StreamID: es.ID, Name: strPtr("L1")})
+	require.NoError(t, err)
+
+	// Block the update inside its database write - which is the window between the prepare of the
+	// in-memory change, and the apply of it
+	writeInFlight := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	mp.ExpectedCalls = prependExpectation(mp.ExpectedCalls,
+		mp.On("WriteListener", m.ctx, mock.Anything).Run(func(args mock.Arguments) {
+			counts.writeListener.Add(1)
+			close(writeInFlight)
+			<-releaseWrite
+		}).Return(nil).Once())
+	mp.On("GetListener", m.ctx, l1.ID).Return(l1, nil)
+	mp.On("DeleteListener", m.ctx, l1.ID).Return(nil)
+
+	updateDone := make(chan error, 1)
+	go func() {
+		_, err := m.UpdateExistingListener(m.ctx, es.ID.String(), l1.ID.String(), &apitypes.Listener{
+			Name: strPtr("L1"),
+		}, false)
+		updateDone <- err
+	}()
+	<-writeInFlight
+
+	// A delete arriving in that window must wait for the update to complete, rather than removing a
+	// listener that the update then resurrects in the runtime and the connector
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- m.DeleteListener(m.ctx, es.ID.String(), l1.ID.String())
+	}()
+	select {
+	case err := <-deleteDone:
+		require.Fail(t, "delete completed while the update was mid-write", "err=%v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseWrite)
+	require.NoError(t, <-updateDone)
+	require.NoError(t, <-deleteDone)
+
+	// The update was applied to the listener that already existed, so the connector saw one add for
+	// the original create and one remove for the delete - and nothing is left behind
+	assert.Equal(t, int32(1), counts.listenerAdd.Load())
+	assert.Equal(t, int32(1), counts.listenerRemove.Load())
+	assert.Nil(t, m.listenersByName["L1"])
+	assert.Empty(t, restartStream(t, m, es).InitialListeners)
 }
 
 func TestDeleteListenerPersistenceFailKeepsName(t *testing.T) {

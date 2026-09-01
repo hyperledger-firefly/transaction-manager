@@ -100,10 +100,15 @@ type manager struct {
 	connector ffcapi.API
 	toolkit   *txhandler.Toolkit
 
+	// listenersAdminMux serializes the create/update/delete listener admin operations against
+	// each other, across all event streams. (including the DB work).
+	// It does not block runtime ops while its held
+	listenersAdminMux sync.Mutex // acquire listenerMux before mux, and never acquire it while holding mux.
+	listenersByName   map[string]*fftypes.UUID
+
 	mux                      sync.Mutex
 	eventStreams             map[fftypes.UUID]events.ManagedStream
 	streamsByName            map[string]*fftypes.UUID
-	listenersByName          map[string]*fftypes.UUID
 	apiStreamsByName         map[string]*fftypes.UUID
 	blockListenerDone        chan struct{}
 	txHandlerDone            <-chan struct{}
