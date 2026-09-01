@@ -80,8 +80,8 @@ func (m *manager) restoreStreams() error {
 // LevelDB edge case is covered, where due to no hard index in LevelDB (unlike PSQL)
 // we could theoretically have a duplicate. So we handle with a log and the first one wins.
 func (m *manager) restoreListenerNames(listeners []*apitypes.Listener) {
-	m.mux.Lock()
-	defer m.mux.Unlock()
+	m.listenersAdminMux.Lock()
+	defer m.listenersAdminMux.Unlock()
 	for _, l := range listeners {
 		if l.Name == nil || *l.Name == "" {
 			continue
@@ -97,6 +97,9 @@ func (m *manager) restoreListenerNames(listeners []*apitypes.Listener) {
 }
 
 func (m *manager) deleteAllStreamListeners(ctx context.Context, streamID *fftypes.UUID) error {
+	m.listenersAdminMux.Lock()
+	defer m.listenersAdminMux.Unlock()
+
 	for {
 		// Do not specify after as we just delete everything
 		listenerDefs, err := m.persistence.ListStreamListenersByCreateTime(ctx, nil, startupPaginationLimit, txhandler.SortDirectionAscending, streamID)
@@ -112,9 +115,7 @@ func (m *manager) deleteAllStreamListeners(ctx context.Context, streamID *fftype
 			}
 			// Only release the name once the row is definitely gone
 			if def.Name != nil {
-				m.mux.Lock()
 				m.releaseListenerName(*def.Name, def.ID)
-				m.mux.Unlock()
 			}
 		}
 	}
@@ -188,11 +189,10 @@ func (m *manager) reserveStreamName(ctx context.Context, name string, id *fftype
 }
 
 // reserveListenerName allocates a name to an ID, including handling the rename case.
-// The caller must commit/rollback the reservation using the supplied function.
+// The caller must commit/rollback the reservation using the supplied function, and must hold
+// listenersAdminMux for both - the reservation only serializes creates against each other if it
+// spans the DB write that decides the winner.
 func (m *manager) reserveListenerName(ctx context.Context, name string, id *fftypes.UUID, prevName *string) (func(bool), error) {
-	m.mux.Lock()
-	defer m.mux.Unlock()
-
 	existing := m.listenersByName[name]
 	if existing != nil && !existing.Equals(id) {
 		return nil, i18n.NewError(ctx, tmmsgs.MsgDuplicateListenerName, name, existing)
@@ -200,8 +200,6 @@ func (m *manager) reserveListenerName(ctx context.Context, name string, id *ffty
 	m.listenersByName[name] = id
 
 	return func(succeeded bool) {
-		m.mux.Lock()
-		defer m.mux.Unlock()
 		switch {
 		case !succeeded && existing == nil:
 			m.releaseListenerName(name, id) // give back if we didn't already have it
@@ -211,7 +209,7 @@ func (m *manager) reserveListenerName(ctx context.Context, name string, id *ffty
 	}, nil
 }
 
-// releaseListenerName frees a name, if held by the ID passed
+// releaseListenerName frees a name, if held by the ID passed. Caller must hold listenersAdminMux.
 func (m *manager) releaseListenerName(name string, id *fftypes.UUID) {
 	if cur := m.listenersByName[name]; cur.Equals(id) {
 		delete(m.listenersByName, name)
@@ -310,10 +308,16 @@ func (m *manager) CreateAndStoreNewStreamListener(ctx context.Context, idStr str
 }
 
 func (m *manager) createAndStoreNewListener(ctx context.Context, def *apitypes.Listener) (*apitypes.Listener, error) {
+	m.listenersAdminMux.Lock()
+	defer m.listenersAdminMux.Unlock()
+
 	return m.createOrUpdateListener(ctx, apitypes.NewULID(), nil /* new, so no name held today */, def, false)
 }
 
 func (m *manager) UpdateExistingListener(ctx context.Context, streamIDStr, listenerIDStr string, updates *apitypes.Listener, reset bool) (*apitypes.Listener, error) {
+	m.listenersAdminMux.Lock()
+	defer m.listenersAdminMux.Unlock()
+
 	l, err := m.getListenerSpec(ctx, streamIDStr, listenerIDStr) // Verify the listener exists in storage
 	if err != nil {
 		return nil, err
@@ -322,6 +326,8 @@ func (m *manager) UpdateExistingListener(ctx context.Context, streamIDStr, liste
 	return m.createOrUpdateListener(ctx, l.ID, l.Name, updates, reset)
 }
 
+// createOrUpdateListener must be called with listenerAdminMux held, as the runtime/connector state
+// is only applied after the DB write completes.
 func (m *manager) createOrUpdateListener(ctx context.Context, id *fftypes.UUID, prevName *string, newOrUpdates *apitypes.Listener, reset bool) (*apitypes.Listener, error) {
 	if err := mergeEthCompatMethods(ctx, newOrUpdates); err != nil {
 		return nil, err
@@ -374,6 +380,9 @@ func (m *manager) createOrUpdateListener(ctx context.Context, id *fftypes.UUID, 
 }
 
 func (m *manager) DeleteListener(ctx context.Context, streamIDStr, listenerIDStr string) error {
+	m.listenersAdminMux.Lock()
+	defer m.listenersAdminMux.Unlock()
+
 	spec, err := m.getListenerSpec(ctx, streamIDStr, listenerIDStr) // Verify the listener exists in storage
 	if err != nil {
 		return err
