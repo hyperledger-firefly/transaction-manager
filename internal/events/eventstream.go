@@ -44,6 +44,29 @@ import (
 
 type Stream = eventapi.EventStream
 
+// ManagedStream extends the connector-facing stream interface with the extra functions FFTM's
+// manager needs - which cannot be added to pkg/eventapi without breaking connectors.
+type ManagedStream interface {
+	Stream
+
+	// VerifyListenerOptions is used in create/update to verify and resolve the full spec
+	// including the Name, which defaults to the resolved signature
+	VerifyListenerOptions(ctx context.Context, id *fftypes.UUID, updatesOrNew *apitypes.Listener) (*apitypes.Listener, error)
+
+	// PrepareListenerUpdate checks a spec previously returned by VerifyListenerOptions against the
+	// current state of the stream, without changing anything. The caller persists the returned
+	// Spec, then calls Apply() to make the update live.
+	PrepareListenerUpdate(ctx context.Context, spec *apitypes.Listener, reset bool) (*PreparedListenerUpdate, error)
+}
+
+// PreparedListenerUpdate is a listener create/update that has been validated against a stream, but
+// not yet applied.  This allows the change to be persisted to the database after prepare, before apply.
+type PreparedListenerUpdate struct {
+	Spec  *apitypes.Listener // new/updated spec fully validated
+	es    *eventStream
+	reset bool
+}
+
 // esDefaults are the defaults for new event streams, read from the config once in InitDefaults()
 var esDefaults struct {
 	initialized               bool
@@ -123,7 +146,7 @@ func NewEventStream(
 	wsChannels ws.WebSocketChannels,
 	initialListeners []*apitypes.Listener,
 	eme metrics.EventMetricsEmitter,
-) (ees Stream, err error) {
+) (ees ManagedStream, err error) {
 	return newEventStream(
 		bgCtx,
 		persistedSpec,
@@ -141,7 +164,7 @@ func NewAPIManagedEventStream(
 	connector ffcapi.API,
 	listeners []*apitypes.Listener,
 	eme metrics.EventMetricsEmitter,
-) (ees Stream, err error) {
+) (ees ManagedStream, err error) {
 	return newEventStream(
 		bgCtx,
 		persistedSpec,
@@ -162,7 +185,7 @@ func newEventStream(
 	wsChannels ws.WebSocketChannels,
 	initialListeners []*apitypes.Listener,
 	eme metrics.EventMetricsEmitter,
-) (ees Stream, err error) {
+) (ees ManagedStream, err error) {
 	esCtx := log.WithLogFields(bgCtx, "eventstream", spec.ID.String())
 	es := &eventStream{
 		bgCtx:                 esCtx,
@@ -185,7 +208,7 @@ func newEventStream(
 	}
 	es.batchChannel = make(chan *ffcapi.ListenerEvent, *es.spec.BatchSize)
 	for _, existing := range initialListeners {
-		spec, err := es.verifyListenerOptions(esCtx, existing.ID, existing)
+		spec, err := es.VerifyListenerOptions(esCtx, existing.ID, existing)
 		if err != nil {
 			return nil, err
 		}
@@ -395,7 +418,7 @@ func (es *eventStream) mergeListenerOptions(id *fftypes.UUID, updates *apitypes.
 
 }
 
-func (es *eventStream) verifyListenerOptions(ctx context.Context, id *fftypes.UUID, updatesOrNew *apitypes.Listener) (*apitypes.Listener, error) {
+func (es *eventStream) VerifyListenerOptions(ctx context.Context, id *fftypes.UUID, updatesOrNew *apitypes.Listener) (*apitypes.Listener, error) {
 	if id == nil {
 		return nil, i18n.NewError(ctx, tmmsgs.MsgMissingID)
 	}
@@ -437,59 +460,30 @@ func (es *eventStream) verifyListenerOptions(ctx context.Context, id *fftypes.UU
 	return spec, nil
 }
 
+// AddOrUpdateListener resolves and applies a listener in one step.
+// Note this is only used externally.
+// The FFTM manager needs to coordinate DB work to persist the change
+// between VerifyListenerOptions and PrepareListenerUpdate.
 func (es *eventStream) AddOrUpdateListener(ctx context.Context, id *fftypes.UUID, updates *apitypes.Listener, reset bool) (merged *apitypes.Listener, err error) {
-	log.L(ctx).Infof("Adding/updating listener %s", id)
-
 	// Ask the connector to verify the options, and apply defaults
-	spec, err := es.verifyListenerOptions(ctx, id, updates)
+	spec, err := es.VerifyListenerOptions(ctx, id, updates)
 	if err != nil {
 		return nil, err
 	}
-
-	// Do the locked part - which checks if this is a new listener, or just an update to the options.
-	isNew, l, startedState, err := es.lockedListenerUpdate(ctx, spec, reset)
+	u, err := es.PrepareListenerUpdate(ctx, spec, reset)
 	if err != nil {
 		return nil, err
 	}
-	if reset {
-		// Only safe to do the reset with the event stream stopped
-		if startedState != nil {
-			if err := es.Stop(ctx); err != nil {
-				return nil, err
-			}
-		}
-		// Clear out the checkpoint for this listener
-		if err := es.resetListenerCheckpoint(ctx, l); err != nil {
-			return nil, err
-		}
-		// Restart if we were started
-		if startedState != nil {
-			if err := es.Start(ctx); err != nil {
-				return nil, err
-			}
-		}
-	} else if isNew && startedState != nil {
-		if l.spec.Type != nil && *l.spec.Type == apitypes.ListenerTypeBlocks {
-			return spec, l.es.confirmations.StartConfirmedBlockListener(ctx, l.spec.ID, *l.spec.FromBlock, nil /* new so no checkpoint */, es.batchChannel)
-		}
-		// Start the new listener - no checkpoint needed here
-		return spec, l.start(startedState, nil)
+	if err := u.Apply(ctx); err != nil {
+		return nil, err
 	}
-	return spec, nil
+	return u.Spec, nil
 }
 
-func (es *eventStream) resetListenerCheckpoint(ctx context.Context, l *listener) error {
-	l.checkpoint = nil
-	l.lastCheckpoint = nil
-	cp, err := es.checkpointsDB.GetCheckpoint(ctx, es.spec.ID)
-	if err != nil || cp == nil {
-		return err
-	}
-	delete(cp.Listeners, *l.spec.ID)
-	return es.checkpointsDB.WriteCheckpoint(ctx, cp)
-}
+// PrepareListenerUpdate checks that a resolved spec is, and returns an update ready to Apply().
+func (es *eventStream) PrepareListenerUpdate(ctx context.Context, spec *apitypes.Listener, reset bool) (*PreparedListenerUpdate, error) {
+	log.L(ctx).Infof("Preparing listener %s", spec.ID)
 
-func (es *eventStream) lockedListenerUpdate(ctx context.Context, spec *apitypes.Listener, reset bool) (bool, *listener, *startedStreamState, error) {
 	es.mux.Lock()
 	defer es.mux.Unlock()
 
@@ -499,20 +493,90 @@ func (es *eventStream) lockedListenerUpdate(ctx context.Context, spec *apitypes.
 		if spec.SignatureString() != l.spec.SignatureString() {
 			// We do not allow the filters to be updated, because that would lead to a confusing situation
 			// where the previously emitted events are a subset/mismatch to the filters configured now.
-			return false, nil, nil, i18n.NewError(ctx, tmmsgs.MsgFilterUpdateNotAllowed, l.spec.SignatureString(), spec.SignatureString())
+			return nil, i18n.NewError(ctx, tmmsgs.MsgFilterUpdateNotAllowed, l.spec.SignatureString(), spec.SignatureString())
 		}
-		l.spec = spec
 	case reset:
-		return false, nil, nil, i18n.NewError(ctx, tmmsgs.MsgResetStreamNotFound, spec.ID, es.spec.ID)
-	default:
+		return nil, i18n.NewError(ctx, tmmsgs.MsgResetStreamNotFound, spec.ID, es.spec.ID)
+	}
+
+	return &PreparedListenerUpdate{
+		Spec:  spec,
+		es:    es,
+		reset: reset,
+	}, nil
+}
+
+// Apply finalizes the update so this new version is the one in the in-memory map of listeners
+// for the stream, and resetting the checkpoint if required.
+func (u *PreparedListenerUpdate) Apply(ctx context.Context) error {
+	es := u.es
+
+	// Update the map to apply this version of the spec (new or updated based on the state at apply)
+	l, isNew, startedState := es.lockedListenerUpdate(u.Spec)
+	log.L(ctx).Infof("Applied listener %s (new=%t, reset=%t)", u.Spec.ID, isNew, u.reset)
+
+	switch {
+	case u.reset:
+		// Only safe to do the reset with the event stream stopped
+		if startedState != nil {
+			if err := es.Stop(ctx); err != nil {
+				return err
+			}
+		}
+		// Clear out the checkpoint for this listener
+		if err := es.resetListenerCheckpoint(ctx, l); err != nil {
+			return err
+		}
+		// Restart if we were started
+		if startedState != nil {
+			if err := es.Start(ctx); err != nil {
+				return err
+			}
+		}
+	case isNew && startedState != nil:
+		if l.spec.Type != nil && *l.spec.Type == apitypes.ListenerTypeBlocks {
+			err := l.es.confirmations.StartConfirmedBlockListener(ctx, l.spec.ID, *l.spec.FromBlock, nil /* new so no checkpoint */, es.batchChannel)
+			if err == nil {
+				l.markStarted(true)
+			}
+			return err
+		}
+		// Start the new listener - no checkpoint needed here
+		return l.start(startedState, nil)
+	}
+	return nil
+}
+
+func (es *eventStream) resetListenerCheckpoint(ctx context.Context, l *listener) error {
+	l.checkpoint = nil
+	l.checkpointSource = checkpointSourceEvent
+	l.lastCheckpoint = nil
+	cp, err := es.checkpointsDB.GetCheckpoint(ctx, es.spec.ID)
+	if err != nil || cp == nil {
+		return err
+	}
+	delete(cp.Listeners, *l.spec.ID)
+	return es.checkpointsDB.WriteCheckpoint(ctx, cp)
+}
+
+// lockedListenerUpdate adds the listener to the stream, or swaps the spec of the existing one,
+// returning it along with the started state read in the same lock hold - so the caller starts it
+// against the state it was actually added to.
+func (es *eventStream) lockedListenerUpdate(spec *apitypes.Listener) (l *listener, isNew bool, startedState *startedStreamState) {
+	es.mux.Lock()
+	defer es.mux.Unlock()
+
+	l, exists := es.listeners[*spec.ID]
+	if exists {
+		l.spec = spec
+	} else {
 		l = &listener{
 			es:   es,
 			spec: spec,
 		}
 		es.listeners[*spec.ID] = l
 	}
-	// Take a copy of the current started status, before unlocking
-	return !exists, l, es.currentState, nil
+	return l, !exists, es.currentState
 }
 
 func (es *eventStream) RemoveListener(ctx context.Context, id *fftypes.UUID) (err error) {
@@ -616,6 +680,14 @@ func (es *eventStream) start(ctx context.Context, apiManagedCheckpoint *apitypes
 		return nil, err
 	}
 
+	// The connector has accepted the stream start with all the initial event listeners - mark them
+	// started so the checkpoint loop knows it can query them (note we hold es.mux)
+	for _, l := range es.listeners {
+		if l.spec.Type == nil || *l.spec.Type != apitypes.ListenerTypeBlocks {
+			l.started = true
+		}
+	}
+
 	// Kick off the loops
 	go es.eventLoop(startedState)
 	if !es.apiManagedStream {
@@ -632,6 +704,9 @@ func (es *eventStream) start(ctx context.Context, apiManagedCheckpoint *apitypes
 			// There are no known reasons for this to fail, as we're starting a fresh set of listeners
 			log.L(startedState.ctx).Errorf("Failed to start block listener: %s", err)
 			return nil, err
+		}
+		if l := es.listeners[*bl.ListenerID]; l != nil {
+			l.started = true // note we hold es.mux
 		}
 	}
 
@@ -698,6 +773,10 @@ func (es *eventStream) Stop(ctx context.Context) error {
 	es.mux.Lock()
 	es.currentState = nil
 	defer es.mux.Unlock()
+	// The connector no longer has any of our listeners - they will be re-added on the next start
+	for _, l := range es.listeners {
+		l.started = false
+	}
 	return es.checkSetStatus(ctx, apitypes.EventStreamStatusStopping, apitypes.EventStreamStatusStopped)
 }
 
@@ -795,6 +874,17 @@ func (es *eventStream) eventLoop(startedState *startedStreamState) {
 	}
 }
 
+func (es *eventStream) getListenerWithCheckpoint(listenerID *fftypes.UUID) (l *listener, currentCheckpoint ffcapi.EventListenerCheckpoint, cpSource checkpointSource) {
+	es.mux.Lock()
+	defer es.mux.Unlock()
+	l = es.listeners[*listenerID]
+	if l != nil {
+		currentCheckpoint = l.checkpoint
+		cpSource = l.checkpointSource
+	}
+	return
+}
+
 func (es *eventStream) checkConfirmedEventForBatch(e *ffcapi.ListenerEvent) (l *listener, ewc *apitypes.EventWithContext) {
 	var eToLog fmt.Stringer
 	var listenerID *fftypes.UUID
@@ -809,23 +899,28 @@ func (es *eventStream) checkConfirmedEventForBatch(e *ffcapi.ListenerEvent) (l *
 		log.L(es.bgCtx).Errorf("Invalid event cannot be dispatched: %+v", e)
 		return nil, nil
 	}
-	es.mux.Lock()
-	l = es.listeners[*listenerID]
-	es.mux.Unlock()
+	l, currentCheckpoint, cpSource := es.getListenerWithCheckpoint(listenerID)
 	if l == nil {
 		log.L(es.bgCtx).Warnf("Confirmed event not associated with any active listener: %s", eToLog)
 		return nil, nil
 	}
-	currentCheckpoint := l.checkpoint
 	if currentCheckpoint != nil && !currentCheckpoint.LessThan(e.Checkpoint) {
-		// This event is behind the current checkpoint - this is a re-detection.
-		// We're perfectly happy to accept re-detections from the connector, as it can be
-		// very efficient to batch operations between listeners that cause re-detections.
-		// However, we need to protect the application from receiving the re-detections.
-		// This loop is the right place for this check, as we are responsible for writing the checkpoints and
-		// delivering to the application. So we are the one source of truth.
-		log.L(es.bgCtx).Debugf("%s '%s' event re-detected behind checkpoint: %s", l.spec.ID, l.spec.SignatureString(), eToLog)
-		return nil, nil
+		if cpSource == checkpointSourceHWM {
+			// The checkpoint holding this event back is the connector's scan position, not the position
+			// of an event the receiver acked. So it does not tell us we already delivered this one, and
+			// we cannot tell a re-detection apart from an event emitted before, but arriving after, we
+			// applied that scan position.
+			// Unsafe to assume this is a re-detection, so we deliver.
+			log.L(es.bgCtx).Warnf("%s '%s' event behind high water mark checkpoint %+v - delivering rather than discarding: %s", l.spec.ID, l.spec.SignatureString(), currentCheckpoint, eToLog)
+		} else {
+			// This event is behind the position of an event the receiver acked, so we know we already
+			// delivered it - this is a re-detection.
+			// We're perfectly happy to accept re-detections from the connector, as it can be
+			// very efficient to batch operations between listeners that cause re-detections.
+			// However, we protect the application from receiving the re-detections in this case.
+			log.L(es.bgCtx).Debugf("%s '%s' event re-detected behind checkpoint: %s", l.spec.ID, l.spec.SignatureString(), eToLog)
+			return nil, nil
+		}
 	}
 	if e.Event != nil {
 		ewc = &apitypes.EventWithContext{
@@ -1041,35 +1136,59 @@ func (es *eventStream) checkUpdateHWMCheckpoint(ctx context.Context, l *listener
 
 	checkpoint := l.checkpoint
 
-	inFlight := false
-	if es.confirmationsRequired > 0 {
-		inFlight = es.confirmations.CheckInFlight(l.spec.ID)
+	// We first ask the connector for their view of the checkpoint for this stream, and then
+	// check against our state to determine if it's safe to apply.
+	res, _, err := es.connector.EventListenerHWM(ctx, &ffcapi.EventListenerHWMRequest{
+		StreamID:   es.spec.ID,
+		ListenerID: l.spec.ID,
+	})
+	if err != nil {
+		log.L(ctx).Errorf("Failed to obtain high watermark checkpoint for listener '%s': %s", l.spec.ID, err)
+		return checkpoint
 	}
 
-	// If there's in-flight messages in the confirmation manager, we wait for these to be confirmed or purged before
-	// writing a checkpoint.
-	if inFlight {
-		log.L(ctx).Infof("Stale checkpoint for listener '%s' will not be updated as events are in-flight", l.spec.ID)
-	} else {
-		res, _, err := es.connector.EventListenerHWM(ctx, &ffcapi.EventListenerHWMRequest{
-			StreamID:   es.spec.ID,
-			ListenerID: l.spec.ID,
-		})
-		if err != nil {
-			log.L(ctx).Errorf("Failed to obtain high watermark checkpoint for listener '%s': %s", l.spec.ID, err)
-			return checkpoint
-		}
-		es.mux.Lock()
-		if l.checkpoint == checkpoint /* double check it hasn't changed */ {
-			checkpoint = res.Checkpoint
-			l.checkpoint = checkpoint
-			l.lastCheckpoint = fftypes.Now()
-		}
-		es.mux.Unlock()
+	es.mux.Lock()
+	defer es.mux.Unlock()
+
+	// Factor in in-flight deliveries (whether waiting for confirmations, or ack from the app)
+	// when determining if the connectors updated checkpoint is safe to apply.
+	if !es.lockedHWMSafeToApply(ctx, l, res) {
+		return checkpoint
+	}
+
+	if l.checkpoint == checkpoint /* double check it hasn't changed */ {
+		checkpoint = res.Checkpoint
+		l.checkpoint = checkpoint
+		l.checkpointSource = checkpointSourceHWM
+		l.lastCheckpoint = fftypes.Now()
 	}
 
 	return checkpoint
 
+}
+
+func (es *eventStream) lockedHWMSafeToApply(ctx context.Context, l *listener, res *ffcapi.EventListenerHWMResponse) bool {
+	if res.LastDetected != nil {
+		// If l.checkpoint (the point we've committed to already based on acks and earlier HWM)
+		// is below the last detection point, it's not safe to move it forwards.
+		// We're waiting for the next ack to arrive (or LastDetected to change on the connector side).
+		if l.checkpoint == nil || l.checkpoint.LessThan(res.LastDetected) {
+			log.L(ctx).Debugf("Stale checkpoint for listener '%s' will not be updated - connector has detected to %+v, we have committed to %+v",
+				l.spec.ID, res.LastDetected, l.checkpoint)
+			return false
+		}
+		return true
+	}
+	// No detection point reported. Either the connector does not implement it, or it has detected
+	// nothing yet for this listener. For example during a long catchup scan that has not matched anything.
+	// Note: for a connector that doesn't implement LastDetected, an event still inside FFTM can end up
+	//       behind a high water mark we applied. We can't distinguish that from a re-detection, so
+	//       checkConfirmedEventForBatch fails safe and redelivers rather than discarding.
+	if es.confirmations.CheckInFlight(l.spec.ID) {
+		log.L(ctx).Debugf("Stale checkpoint for listener '%s' will not be updated as events are in-flight", l.spec.ID)
+		return false
+	}
+	return true
 }
 
 func (es *eventStream) generateCheckpoint(startedState *startedStreamState, batch *eventStreamBatch) *apitypes.EventStreamCheckpoint {
@@ -1086,6 +1205,7 @@ func (es *eventStream) generateCheckpoint(startedState *startedStreamState, batc
 		for lID, lCP := range batch.checkpoints {
 			if l, ok := es.listeners[lID]; ok {
 				l.checkpoint = lCP
+				l.checkpointSource = checkpointSourceEvent // this is the position of an event the receiver has acked
 				l.lastCheckpoint = startedState.lastCheckpoint
 				log.L(es.bgCtx).Tracef("%s (%s) checkpoint: %+v", l.spec.SignatureString(), l.spec.ID, lCP)
 			}
@@ -1093,8 +1213,16 @@ func (es *eventStream) generateCheckpoint(startedState *startedStreamState, batc
 	}
 	staleCheckpoints := make([]*listener, 0)
 	for lID, l := range es.listeners {
-		cp.Listeners[lID], _ = json.Marshal(l.checkpoint)
-		if l.checkpoint == nil || l.lastCheckpoint == nil || time.Since(*l.lastCheckpoint.Time()) > es.checkpointInterval {
+		// Store all non-nil current checkpoints in the map
+		if l.checkpoint != nil {
+			cp.Listeners[lID], _ = json.Marshal(l.checkpoint)
+		}
+		// Add all started listeners with non-existent or stale checkpoints to the stale list,
+		// which we query below after we've dropped the lock.
+		// Block listeners are excluded - they are handled entirely inside our own confirmation manager,
+		// are never passed to the connector, and their checkpoint advances with every block event.
+		isBlockListener := l.spec.Type != nil && *l.spec.Type == apitypes.ListenerTypeBlocks
+		if l.started && !isBlockListener && (l.checkpoint == nil || l.lastCheckpoint == nil || time.Since(*l.lastCheckpoint.Time()) > es.checkpointInterval) {
 			staleCheckpoints = append(staleCheckpoints, l)
 		}
 	}
@@ -1102,8 +1230,9 @@ func (es *eventStream) generateCheckpoint(startedState *startedStreamState, batc
 
 	// Ask the connector for any updated high watermark checkpoints - checking we don't have any in-flight confirmations
 	for _, l := range staleCheckpoints {
-		cpb, _ := json.Marshal(es.checkUpdateHWMCheckpoint(startedState.ctx, l))
-		cp.Listeners[*l.spec.ID] = cpb
+		if updatedCheckpoint := es.checkUpdateHWMCheckpoint(startedState.ctx, l); updatedCheckpoint != nil {
+			cp.Listeners[*l.spec.ID], _ = json.Marshal(updatedCheckpoint)
+		}
 	}
 	return cp
 }

@@ -609,7 +609,8 @@ func TestAPIManagedEventStreamE2E(t *testing.T) {
 		}
 	}).Return(nil)
 	mcm.On("StopConfirmedBlockListener", mock.Anything, l.ID).Return(nil)
-	mcm.On("CheckInFlight", l.ID).Return(true) // simulate in-flight to prevent checking HWM
+	// Note no CheckInFlight stub - a block listener is never passed to the connector, so a checkpoint
+	// cycle does not take the high water mark route for it
 
 	mfc.On("EventStreamStart", mock.Anything, mock.MatchedBy(func(r *ffcapi.EventStreamStartRequest) bool {
 		return r.ID.Equals(es.spec.ID)
@@ -2088,7 +2089,8 @@ func TestHWMCheckpointAfterInactivity(t *testing.T) {
 	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
 
 	li := &listener{
-		spec: &apitypes.Listener{ID: fftypes.NewUUID()},
+		spec:    &apitypes.Listener{ID: fftypes.NewUUID()},
+		started: true,
 	}
 
 	mcm := &confirmationsmocks.Manager{}
@@ -2133,9 +2135,11 @@ func TestHWMCheckpointInFlightSkip(t *testing.T) {
 	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
 
 	li := &listener{
-		spec: &apitypes.Listener{ID: fftypes.NewUUID()},
+		spec:    &apitypes.Listener{ID: fftypes.NewUUID()},
+		started: true,
 	}
 
+	// Legacy connector - reports no LastDetected, so we fall back to the confirmation manager
 	mcm := &confirmationsmocks.Manager{}
 	mcm.On("CheckInFlight", li.spec.ID).Run(func(args mock.Arguments) {
 		ss.cancelCtx()
@@ -2144,15 +2148,24 @@ func TestHWMCheckpointInFlightSkip(t *testing.T) {
 	es.confirmationsRequired = 1
 	es.listeners[*li.spec.ID] = li
 
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerHWM", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerHWMResponse{
+		Checkpoint: &utCheckpointType{SomeSequenceNumber: 12345},
+	}, ffcapi.ErrorReason(""), nil)
+
 	msp := es.checkpointsDB.(*persistencemocks.Persistence)
 	msp.On("WriteCheckpoint", mock.Anything, mock.MatchedBy(func(cp *apitypes.EventStreamCheckpoint) bool {
-		return cp.StreamID.Equals(es.spec.ID) && string(cp.Listeners[*li.spec.ID]) == `null`
+		// The listener has no checkpoint, so no entry must be written for it (not a literal JSON "null")
+		_, hasEntry := cp.Listeners[*li.spec.ID]
+		return cp.StreamID.Equals(es.spec.ID) && !hasEntry
 	})).Return(nil)
 
 	es.checkpointInterval = 1 * time.Microsecond
 
 	es.batchLoop(ss)
 
+	assert.Nil(t, li.checkpoint)
+	mfc.AssertExpectations(t)
 	msp.AssertExpectations(t)
 	mcm.AssertExpectations(t)
 }
@@ -2170,11 +2183,13 @@ func TestHWMCheckpointFail(t *testing.T) {
 	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
 
 	li := &listener{
-		spec: &apitypes.Listener{ID: fftypes.NewUUID()},
+		spec:    &apitypes.Listener{ID: fftypes.NewUUID()},
+		started: true,
 	}
 
+	// The query fails, so we never get as far as deciding whether the answer is safe to apply -
+	// no call is made to the confirmation manager
 	mcm := &confirmationsmocks.Manager{}
-	mcm.On("CheckInFlight", li.spec.ID).Return(false)
 	es.confirmations = mcm
 	es.confirmationsRequired = 1
 	es.listeners[*li.spec.ID] = li
@@ -2188,7 +2203,9 @@ func TestHWMCheckpointFail(t *testing.T) {
 
 	msp := es.checkpointsDB.(*persistencemocks.Persistence)
 	msp.On("WriteCheckpoint", mock.Anything, mock.MatchedBy(func(cp *apitypes.EventStreamCheckpoint) bool {
-		return cp.StreamID.Equals(es.spec.ID) && string(cp.Listeners[*li.spec.ID]) == `null`
+		// The listener has no checkpoint, so no entry must be written for it (not a literal JSON "null")
+		_, hasEntry := cp.Listeners[*li.spec.ID]
+		return cp.StreamID.Equals(es.spec.ID) && !hasEntry
 	})).Return(nil)
 
 	es.checkpointInterval = 1 * time.Microsecond
@@ -2198,6 +2215,434 @@ func TestHWMCheckpointFail(t *testing.T) {
 	mfc.AssertExpectations(t)
 	msp.AssertExpectations(t)
 	mcm.AssertExpectations(t)
+}
+
+// newHWMTestListener builds a started listener with a stale checkpoint, so that a checkpoint cycle
+// takes the high water mark route for it
+func newHWMTestListener(es *eventStream, checkpoint ffcapi.EventListenerCheckpoint) *listener {
+	li := &listener{
+		es:         es,
+		spec:       &apitypes.Listener{ID: fftypes.NewUUID(), Name: strPtr("ut_listener")},
+		started:    true,
+		checkpoint: checkpoint,
+	}
+	// A long interval with a nil lastCheckpoint forces staleness deterministically - a short interval
+	// makes the checkpoint written inside generateCheckpoint itself stale within the same call
+	es.checkpointInterval = 1 * time.Hour
+	es.listeners[*li.spec.ID] = li
+	return li
+}
+
+func TestHWMNotAppliedWhenConnectorHasDetectedAhead(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+	defer ss.cancelCtx()
+
+	li := newHWMTestListener(es, &utCheckpointType{SomeSequenceNumber: 4900})
+
+	// Zero confirmations is the configuration where the confirmation manager is bypassed entirely,
+	// so it can never report an in-flight event - the connector's answer is all we have
+	mcm := &confirmationsmocks.Manager{}
+	es.confirmations = mcm
+	es.confirmationsRequired = 0
+
+	// The connector has scanned to 5000, but the last event it pushed to us is at 4950 and we have
+	// only committed to 4900. Applying 5000 would put that event behind its own listener's checkpoint
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerHWM", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerHWMResponse{
+		Checkpoint:   &utCheckpointType{SomeSequenceNumber: 5000},
+		LastDetected: &utCheckpointType{SomeSequenceNumber: 4950},
+	}, ffcapi.ErrorReason(""), nil).Once()
+
+	cp := es.generateCheckpoint(ss, nil)
+	assert.Equal(t, &utCheckpointType{SomeSequenceNumber: 4900}, li.checkpoint)
+	assert.Equal(t, checkpointSourceEvent, li.checkpointSource)
+	assert.JSONEq(t, `{"someSequenceNumber":4900}`, string(cp.Listeners[*li.spec.ID]))
+
+	mfc.AssertExpectations(t)
+	mcm.AssertExpectations(t)
+	mcm.AssertNotCalled(t, "CheckInFlight", mock.Anything)
+}
+
+func TestHWMAppliedWhenAllDetectedCommitted(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+	defer ss.cancelCtx()
+
+	li := newHWMTestListener(es, &utCheckpointType{SomeSequenceNumber: 4950})
+
+	mcm := &confirmationsmocks.Manager{}
+	es.confirmations = mcm
+	es.confirmationsRequired = 0
+
+	// We have committed everything the connector detected, so the scan position is safe to apply.
+	// This is the reason the high water mark route exists - an idle listener behind a busy chain
+	// must still make progress, or a restart replays from wherever it last saw an event
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerHWM", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerHWMResponse{
+		Checkpoint:   &utCheckpointType{SomeSequenceNumber: 5000},
+		LastDetected: &utCheckpointType{SomeSequenceNumber: 4950},
+	}, ffcapi.ErrorReason(""), nil).Once()
+
+	cp := es.generateCheckpoint(ss, nil)
+	assert.Equal(t, &utCheckpointType{SomeSequenceNumber: 5000}, li.checkpoint)
+	assert.Equal(t, checkpointSourceHWM, li.checkpointSource)
+	assert.JSONEq(t, `{"someSequenceNumber":5000}`, string(cp.Listeners[*li.spec.ID]))
+
+	mfc.AssertExpectations(t)
+	mcm.AssertExpectations(t)
+}
+
+func TestHWMNotAppliedWhenNothingCommitted(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+	defer ss.cancelCtx()
+
+	li := newHWMTestListener(es, nil)
+
+	mcm := &confirmationsmocks.Manager{}
+	es.confirmations = mcm
+	es.confirmationsRequired = 0
+
+	// We have committed nothing at all, so anything the connector has detected holds us back
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerHWM", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerHWMResponse{
+		Checkpoint:   &utCheckpointType{SomeSequenceNumber: 5000},
+		LastDetected: &utCheckpointType{SomeSequenceNumber: 4950},
+	}, ffcapi.ErrorReason(""), nil).Once()
+
+	cp := es.generateCheckpoint(ss, nil)
+	assert.Nil(t, li.checkpoint)
+	_, hasEntry := cp.Listeners[*li.spec.ID]
+	assert.False(t, hasEntry)
+
+	mfc.AssertExpectations(t)
+	mcm.AssertExpectations(t)
+}
+
+func TestHWMLegacyConnectorFallsBackToCheckInFlight(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+	defer ss.cancelCtx()
+
+	li := newHWMTestListener(es, &utCheckpointType{SomeSequenceNumber: 4900})
+
+	// Zero confirmations - the configuration in which the old guard was skipped entirely, because
+	// it was gated on confirmationsRequired > 0
+	mcm := &confirmationsmocks.Manager{}
+	es.confirmations = mcm
+	es.confirmationsRequired = 0
+
+	// The connector reports no LastDetected, so the confirmation manager is all we have
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerHWM", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerHWMResponse{
+		Checkpoint: &utCheckpointType{SomeSequenceNumber: 5000},
+	}, ffcapi.ErrorReason(""), nil)
+
+	inFlight := mcm.On("CheckInFlight", li.spec.ID).Return(true).Once()
+	cp := es.generateCheckpoint(ss, nil)
+	assert.Equal(t, &utCheckpointType{SomeSequenceNumber: 4900}, li.checkpoint)
+	assert.JSONEq(t, `{"someSequenceNumber":4900}`, string(cp.Listeners[*li.spec.ID]))
+
+	// Once nothing is in flight it applies
+	inFlight.Unset()
+	li.lastCheckpoint = nil // force staleness rather than sleeping
+	mcm.On("CheckInFlight", li.spec.ID).Return(false).Once()
+	cp = es.generateCheckpoint(ss, nil)
+	assert.Equal(t, &utCheckpointType{SomeSequenceNumber: 5000}, li.checkpoint)
+	assert.Equal(t, checkpointSourceHWM, li.checkpointSource)
+	assert.JSONEq(t, `{"someSequenceNumber":5000}`, string(cp.Listeners[*li.spec.ID]))
+
+	mfc.AssertExpectations(t)
+	mcm.AssertExpectations(t)
+}
+
+func TestHWMQueriesConnectorBeforeDeciding(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+	defer ss.cancelCtx()
+
+	li := newHWMTestListener(es, &utCheckpointType{SomeSequenceNumber: 4900})
+
+	mcm := &confirmationsmocks.Manager{}
+	es.confirmations = mcm
+	es.confirmationsRequired = 1
+
+	// The connector must be asked before we decide, not after we have already ruled the update out.
+	// Anything we check beforehand is stale by the time the answer arrives, so the answer has to be
+	// what the decision is made against
+	queried := false
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerHWM", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		assert.False(t, queried)
+		queried = true
+	}).Return(&ffcapi.EventListenerHWMResponse{
+		Checkpoint: &utCheckpointType{SomeSequenceNumber: 5000},
+	}, ffcapi.ErrorReason(""), nil).Once()
+	mcm.On("CheckInFlight", li.spec.ID).Run(func(args mock.Arguments) {
+		assert.True(t, queried, "the connector must be queried before the in-flight check")
+	}).Return(true).Once()
+
+	es.generateCheckpoint(ss, nil)
+	assert.True(t, queried)
+	assert.Equal(t, &utCheckpointType{SomeSequenceNumber: 4900}, li.checkpoint)
+
+	mfc.AssertExpectations(t)
+	mcm.AssertExpectations(t)
+}
+
+func TestNoHWMQueryForBlockListener(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+	defer ss.cancelCtx()
+
+	// A block listener is handled entirely inside our own confirmation manager, and is never passed
+	// to the connector - so a stale checkpoint must not turn into a query for a listener ID the
+	// connector has never heard of
+	li := newHWMTestListener(es, nil)
+	li.spec.Type = &apitypes.ListenerTypeBlocks
+
+	mcm := &confirmationsmocks.Manager{}
+	es.confirmations = mcm
+	es.confirmationsRequired = 1
+
+	mfc := es.connector.(*ffcapimocks.API)
+	cp := es.generateCheckpoint(ss, nil)
+	_, hasEntry := cp.Listeners[*li.spec.ID]
+	assert.False(t, hasEntry)
+
+	mfc.AssertNotCalled(t, "EventListenerHWM", mock.Anything, mock.Anything)
+	mcm.AssertNotCalled(t, "CheckInFlight", mock.Anything)
+}
+
+func TestEventBehindHWMCheckpointIsDelivered(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	li := newHWMTestListener(es, &utCheckpointType{SomeSequenceNumber: 5000})
+	li.checkpointSource = checkpointSourceHWM
+
+	e := &ffcapi.ListenerEvent{
+		Checkpoint: &utCheckpointType{SomeSequenceNumber: 4950},
+		Event:      &ffcapi.Event{ID: ffcapi.EventID{ListenerID: li.spec.ID, BlockNumber: 4950}},
+	}
+
+	// Behind a high water mark checkpoint we cannot tell a re-detection apart from an event emitted
+	// before, but arriving after, we applied the connector's scan position. A duplicate is absorbed
+	// by FireFly on protocol ID, a drop is not - so we deliver
+	l, ewc := es.checkConfirmedEventForBatch(e)
+	assert.Equal(t, li, l)
+	assert.NotNil(t, ewc)
+	assert.Equal(t, uint64(4950), ewc.Event.ID.BlockNumber.Uint64())
+
+	// Behind the position of an event the receiver acked, we know we already delivered it
+	li.checkpointSource = checkpointSourceEvent
+	l, ewc = es.checkConfirmedEventForBatch(e)
+	assert.Nil(t, l)
+	assert.Nil(t, ewc)
+}
+
+func TestHWMCheckpointPersistedDuringCatchup(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+	defer ss.cancelCtx()
+
+	li := &listener{
+		spec:    &apitypes.Listener{ID: fftypes.NewUUID()},
+		started: true,
+	}
+
+	mcm := &confirmationsmocks.Manager{}
+	mcm.On("CheckInFlight", li.spec.ID).Return(false)
+	es.confirmations = mcm
+	es.confirmationsRequired = 1
+	es.listeners[*li.spec.ID] = li
+	es.checkpointInterval = 1 * time.Microsecond
+
+	// A listener catching up from a historical fromBlock reports its moving scan position as its
+	// HWM, with the informational catchup flag set. That scan position is the correct checkpoint -
+	// it must be persisted regularly, or a restart mid-catchup would rewind the listener to the
+	// beginning of a scan that can take hours
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerHWM", mock.Anything, mock.MatchedBy(func(req *ffcapi.EventListenerHWMRequest) bool {
+		return req.StreamID.Equals(es.spec.ID) && req.ListenerID.Equals(li.spec.ID)
+	})).Return(&ffcapi.EventListenerHWMResponse{
+		Checkpoint: &utCheckpointType{SomeSequenceNumber: 12345},
+		Catchup:    true,
+	}, ffcapi.ErrorReason(""), nil).Once()
+
+	cp := es.generateCheckpoint(ss, nil)
+	assert.Equal(t, &utCheckpointType{SomeSequenceNumber: 12345}, li.checkpoint)
+	assert.JSONEq(t, `{"someSequenceNumber":12345}`, string(cp.Listeners[*li.spec.ID]))
+
+	// And again as the scan position advances
+	li.lastCheckpoint = nil // force staleness rather than sleeping
+	mfc.On("EventListenerHWM", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerHWMResponse{
+		Checkpoint: &utCheckpointType{SomeSequenceNumber: 23456},
+		Catchup:    true,
+	}, ffcapi.ErrorReason(""), nil).Once()
+
+	cp = es.generateCheckpoint(ss, nil)
+	assert.Equal(t, &utCheckpointType{SomeSequenceNumber: 23456}, li.checkpoint)
+	assert.JSONEq(t, `{"someSequenceNumber":23456}`, string(cp.Listeners[*li.spec.ID]))
+
+	mfc.AssertExpectations(t)
+	mcm.AssertExpectations(t)
+}
+
+func TestCheckpointRoundTripNeverCheckpointedListener(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+	defer ss.cancelCtx()
+
+	li := &listener{
+		es: es,
+		spec: &apitypes.Listener{
+			ID:        apitypes.NewULID(),
+			Name:      strPtr("ut_listener"),
+			FromBlock: strPtr("0"),
+		},
+		started: true,
+	}
+
+	mcm := &confirmationsmocks.Manager{}
+	mcm.On("CheckInFlight", li.spec.ID).Return(false)
+	es.confirmations = mcm
+	es.confirmationsRequired = 1
+	es.listeners[*li.spec.ID] = li
+
+	// The connector cannot supply a HWM checkpoint
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerHWM", mock.Anything, mock.Anything).Return(nil, ffcapi.ErrorReason(""), fmt.Errorf("pop"))
+
+	// The generated checkpoint must carry no entry for the listener at all
+	cp := es.generateCheckpoint(ss, nil)
+	_, hasEntry := cp.Listeners[*li.spec.ID]
+	assert.False(t, hasEntry)
+
+	// So on restart, no checkpoint is passed to the connector, and it initializes from fromBlock
+	req := li.buildAddRequest(context.Background(), cp)
+	assert.Nil(t, req.Checkpoint)
+
+	// A legacy "null" entry written by an older version must be treated the same as no checkpoint,
+	// rather than being passed to the connector as a zero-valued checkpoint
+	cp.Listeners[*li.spec.ID] = json.RawMessage(`null`)
+	req = li.buildAddRequest(context.Background(), cp)
+	assert.Nil(t, req.Checkpoint)
+
+	// Same for a block listener - where prior to this check a "null" entry unmarshalled to a
+	// zero-valued (non-nil) checkpoint at block zero
+	blSpec := &apitypes.Listener{
+		ID:        apitypes.NewULID(),
+		Name:      strPtr("ut_block_listener"),
+		Type:      &apitypes.ListenerTypeBlocks,
+		FromBlock: strPtr(ffcapi.FromBlockLatest),
+	}
+	bl := &listener{es: es, spec: blSpec}
+	blar := bl.buildBlockAddRequest(context.Background(), &apitypes.EventStreamCheckpoint{
+		Listeners: apitypes.CheckpointListeners{
+			*blSpec.ID: json.RawMessage(`null`),
+		},
+	})
+	assert.Nil(t, blar.Checkpoint)
+}
+
+func TestNoHWMCheckpointForNotYetStartedListener(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+	defer ss.cancelCtx()
+
+	// The listener is visible in the map, but the connector has not yet accepted it
+	// (EventListenerAdd has not returned) - as happens in AddOrUpdateListener between
+	// lockedListenerUpdate and l.start
+	li := &listener{
+		es: es,
+		spec: &apitypes.Listener{
+			ID:        apitypes.NewULID(),
+			Name:      strPtr("ut_listener"),
+			FromBlock: strPtr("0"),
+		},
+	}
+
+	mcm := &confirmationsmocks.Manager{}
+	es.confirmations = mcm
+	es.confirmationsRequired = 1
+	es.listeners[*li.spec.ID] = li
+
+	// Note no EventListenerHWM (or CheckInFlight) expectations - a checkpoint cycle must not
+	// query the connector for a listener it does not know about yet
+	mfc := es.connector.(*ffcapimocks.API)
+	cp := es.generateCheckpoint(ss, nil)
+	_, hasEntry := cp.Listeners[*li.spec.ID]
+	assert.False(t, hasEntry)
+	mfc.AssertNotCalled(t, "EventListenerHWM", mock.Anything, mock.Anything)
+
+	// A successful EventListenerAdd (via l.start) marks it started
+	mfc.On("EventListenerAdd", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerAddResponse{}, ffcapi.ErrorReason(""), nil).Once()
+	err := li.start(ss, nil)
+	assert.NoError(t, err)
+	assert.True(t, li.started)
+
+	// And a listener stop marks it not started again
+	mfc.On("EventListenerRemove", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerRemoveResponse{}, ffcapi.ErrorReason(""), nil).Once()
+	err = li.stop(ss)
+	assert.NoError(t, err)
+	assert.False(t, li.started)
+
+	// A failed EventListenerAdd must not mark it started
+	mfc.On("EventListenerAdd", mock.Anything, mock.Anything).Return(nil, ffcapi.ErrorReason(""), fmt.Errorf("pop")).Once()
+	err = li.start(ss, nil)
+	assert.Error(t, err)
+	assert.False(t, li.started)
+
+	mfc.AssertExpectations(t)
 }
 
 func TestCheckConfirmedEventForBatchIgnoreInvalid(t *testing.T) {
@@ -2289,4 +2734,149 @@ func TestStartAPIEventStreamPollContextCancelled(t *testing.T) {
 	_, _, err = ees.PollAPIMangedStream(ctx, nil, 1*time.Second)
 	require.Regexp(t, "FF00154", err)
 
+}
+
+// Check in the two-stage verify+apply, the original listener stays in-place until the Apply() completes
+func TestPrepareListenerUpdateInvisibleUntilApply(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{
+		ResolvedSignature: "sig1",
+	}, ffcapi.ErrorReason(""), nil)
+	initialListeners := make(chan int, 10)
+	mfc.On("EventStreamStart", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		initialListeners <- len(args[1].(*ffcapi.EventStreamStartRequest).InitialListeners)
+	}).Return(&ffcapi.EventStreamStartResponse{}, ffcapi.ErrorReason(""), nil)
+	added := make(chan *fftypes.UUID, 1)
+	mfc.On("EventListenerAdd", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		added <- args[1].(*ffcapi.EventListenerAddRequest).ListenerID
+	}).Return(nil, ffcapi.ErrorReason(""), nil)
+	mfc.On("EventStreamStopped", mock.Anything, mock.Anything).Return(&ffcapi.EventStreamStoppedResponse{}, ffcapi.ErrorReason(""), nil).Maybe()
+
+	msp := es.checkpointsDB.(*persistencemocks.Persistence)
+	msp.On("GetCheckpoint", mock.Anything, mock.Anything).Return(nil, nil)
+
+	require.NoError(t, es.Start(es.bgCtx))
+	assert.Equal(t, 0, <-initialListeners)
+
+	lID := fftypes.NewUUID()
+	spec, err := es.VerifyListenerOptions(es.bgCtx, lID, &apitypes.Listener{
+		Name:    strPtr("ut_listener"),
+		Filters: []fftypes.JSONAny{`{"event":"definition1"}`},
+	})
+	require.NoError(t, err)
+	u, err := es.PrepareListenerUpdate(es.bgCtx, spec, false)
+	require.NoError(t, err)
+
+	// The stream does not know about the listener yet
+	es.mux.Lock()
+	_, exists := es.listeners[*lID]
+	es.mux.Unlock()
+	assert.False(t, exists)
+
+	// ... so a restart in the window cannot register it with the connector
+	require.NoError(t, es.Stop(es.bgCtx))
+	require.NoError(t, es.Start(es.bgCtx))
+	assert.Equal(t, 0, <-initialListeners)
+
+	// Applying is what makes it real
+	require.NoError(t, u.Apply(es.bgCtx))
+	assert.Equal(t, lID, <-added)
+	es.mux.Lock()
+	l, exists := es.listeners[*lID]
+	assert.True(t, l.started)
+	es.mux.Unlock()
+	require.True(t, exists)
+
+	require.NoError(t, es.Stop(es.bgCtx))
+}
+
+func TestPrepareListenerUpdateExistingUnchangedUntilApply(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{
+		ResolvedSignature: "sig1",
+	}, ffcapi.ErrorReason(""), nil)
+	// An update must never remove the listener it is updating
+	mfc.On("EventListenerRemove", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		assert.Fail(t, "listener must not be removed by an update")
+	}).Return(&ffcapi.EventListenerRemoveResponse{}, ffcapi.ErrorReason(""), nil).Maybe()
+
+	lID := fftypes.NewUUID()
+	original, err := es.VerifyListenerOptions(es.bgCtx, lID, &apitypes.Listener{
+		Name:    strPtr("name1"),
+		Filters: []fftypes.JSONAny{`{"event":"definition1"}`},
+	})
+	require.NoError(t, err)
+	u, err := es.PrepareListenerUpdate(es.bgCtx, original, false)
+	require.NoError(t, err)
+	require.NoError(t, u.Apply(es.bgCtx))
+
+	updated, err := es.VerifyListenerOptions(es.bgCtx, lID, &apitypes.Listener{
+		Name: strPtr("name2"),
+	})
+	require.NoError(t, err)
+	u, err = es.PrepareListenerUpdate(es.bgCtx, updated, false)
+	require.NoError(t, err)
+
+	// The listener is still on its previous spec until the caller applies
+	es.mux.Lock()
+	l := es.listeners[*lID]
+	es.mux.Unlock()
+	assert.Same(t, original, l.spec)
+
+	require.NoError(t, u.Apply(es.bgCtx))
+	es.mux.Lock()
+	l, exists := es.listeners[*lID]
+	es.mux.Unlock()
+	require.True(t, exists)
+	assert.Same(t, updated, l.spec)
+}
+
+func TestApplyListenerUpdateRemovedWhilePersisting(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	mfc := es.connector.(*ffcapimocks.API)
+	mfc.On("EventListenerVerifyOptions", mock.Anything, mock.Anything).Return(&ffcapi.EventListenerVerifyOptionsResponse{
+		ResolvedSignature: "sig1",
+	}, ffcapi.ErrorReason(""), nil)
+
+	msp := es.checkpointsDB.(*persistencemocks.Persistence)
+	msp.On("GetCheckpoint", mock.Anything, mock.Anything).Return(nil, nil)
+
+	lID := fftypes.NewUUID()
+	spec, err := es.VerifyListenerOptions(es.bgCtx, lID, &apitypes.Listener{
+		Name:    strPtr("name1"),
+		Filters: []fftypes.JSONAny{`{"event":"definition1"}`},
+	})
+	require.NoError(t, err)
+	u, err := es.PrepareListenerUpdate(es.bgCtx, spec, false)
+	require.NoError(t, err)
+	require.NoError(t, u.Apply(es.bgCtx))
+
+	// A reset prepared against a listener that is removed before we apply. The caller has written
+	// the spec by this point, so the right answer is to end up matching it, not to fail.
+	u, err = es.PrepareListenerUpdate(es.bgCtx, spec, true)
+	require.NoError(t, err)
+	es.mux.Lock()
+	delete(es.listeners, *lID)
+	es.mux.Unlock()
+	require.NoError(t, u.Apply(es.bgCtx))
+
+	es.mux.Lock()
+	l, exists := es.listeners[*lID]
+	es.mux.Unlock()
+	require.True(t, exists)
+	assert.Same(t, spec, l.spec)
 }

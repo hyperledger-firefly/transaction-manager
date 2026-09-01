@@ -112,4 +112,5 @@ var (
 	MsgConfirmedBlockListenerUnsupportedMode   = ffe("FF21095", "Block listener is not supported when chain tracking mode is '%s'", http.StatusBadRequest)
 	MsgTransactionReceiptMissingBlockHash      = ffe("FF21096", "Transaction receipt missing block hash")
 	MsgTransactionReceiptBlockHashMismatch     = ffe("FF21097", "Transaction receipt block hash mismatch. Expected %s, got %s")
+	MsgDuplicateListenerName                   = ffe("FF21098", "Duplicate listener name '%s' used by listener '%s'", http.StatusConflict)
 )

@@ -80,6 +80,7 @@ type API interface {
 	EventListenerRemove(ctx context.Context, req *EventListenerRemoveRequest) (*EventListenerRemoveResponse, ErrorReason, error)
 
 	// EventListenerHWM queries the current high water mark checkpoint for a listener. Called at regular intervals when there are no events in flight for a listener, to ensure checkpoint are written regularly even when there is no activity
+	// ** See important notes on EventListenerHWMResponse docs **
 	EventListenerHWM(ctx context.Context, req *EventListenerHWMRequest) (*EventListenerHWMResponse, ErrorReason, error)
 
 	// EventStreamNewCheckpointStruct used during checkpoint restore, to get the specific into which to restore the JSON bytes
