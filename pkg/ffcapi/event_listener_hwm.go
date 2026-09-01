@@ -37,6 +37,9 @@ type EventListenerHWMRequest struct {
 // These differ, because the connector can scan past events that are still sat in the
 // channel unread - FFTM cannot see those for itself, so it must be told.
 //
+// So the checkpoint returned could be ahead of last detected (if we ever detected an event),
+// but never behind.
+//
 // FFTM applies Checkpoint only once everything up to LastDetected has been delivered and acked.
 //
 // The connector needs to hold in memory a LastDetected value (to return when asked) that
