@@ -216,6 +216,7 @@
 |---|-----------|----|-------------|
 |address|Listener address|`int`|`127.0.0.1`
 |enabled|Enables the monitoring APIs|`boolean`|`false`
+|loggingPath|The path at which to serve the dynamic logging API, which allows the log level to be changed at runtime|`string`|`/logging`
 |metricsPath|The path from which to serve the Prometheus metrics|`string`|`/metrics`
 |port|Listener port|`int`|`6000`
 |publicURL|Externally available URL for the HTTP endpoint|`string`|`<nil>`

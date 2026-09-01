@@ -18,11 +18,13 @@ package fftm
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/hyperledger-firefly/common/pkg/config"
 	"github.com/hyperledger-firefly/common/pkg/ffapi"
 	"github.com/hyperledger-firefly/common/pkg/i18n"
+	"github.com/hyperledger-firefly/common/pkg/log"
 	"github.com/hyperledger-firefly/transaction-manager/internal/tmconfig"
 )
 
@@ -77,6 +79,7 @@ func (m *manager) createMonitoringMuxRouter() *mux.Router {
 		DefaultRequestTimeout: config.GetDuration(tmconfig.APIDefaultRequestTimeout),
 		MaxTimeout:            config.GetDuration(tmconfig.APIMaxRequestTimeout),
 	}
+	r.Path(config.GetString(tmconfig.MonitoringLoggingPath)).Handler(hf.APIWrapper(m.loggingSettingsHandler))
 	for _, route := range m.monitoringRoutes() {
 		r.Path(route.Path).Methods(route.Method).Handler(hf.RouteHandler(route))
 	}
@@ -84,6 +87,29 @@ func (m *manager) createMonitoringMuxRouter() *mux.Router {
 		return 404, i18n.NewError(req.Context(), i18n.Msg404NotFound)
 	})
 	return r
+}
+
+// loggingSettingsHandler allows the log level to be changed dynamically at runtime,
+// mirroring the standard monitoring API provided by ffapi.APIServer
+func (m *manager) loggingSettingsHandler(_ http.ResponseWriter, req *http.Request) (status int, err error) {
+	if req.Method != http.MethodPut {
+		return http.StatusMethodNotAllowed, i18n.NewError(req.Context(), i18n.MsgMethodNotAllowed)
+	}
+	logLevel := req.URL.Query().Get("level")
+	if logLevel != "" {
+		l := log.L(log.WithLogFieldsMap(req.Context(), map[string]string{"new_level": logLevel}))
+		switch strings.ToLower(logLevel) {
+		case "error", "debug", "trace", "info", "warn":
+			// noop - all valid levels
+		default:
+			l.Warn("invalid log level")
+			return http.StatusBadRequest, i18n.NewError(req.Context(), i18n.MsgInvalidLogLevel, logLevel)
+		}
+		l.Warnf("changing log level to %s", logLevel)
+		log.SetLevel(logLevel)
+	}
+
+	return http.StatusAccepted, nil
 }
 
 func (m *manager) runAPIServer() {

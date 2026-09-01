@@ -60,6 +60,7 @@ var (
 	DeprecatedMetricsPath                         = ffc("metrics.path")
 	MonitoringEnabled                             = ffc("monitoring.enabled")
 	MonitoringMetricsPath                         = ffc("monitoring.metricsPath")
+	MonitoringLoggingPath                         = ffc("monitoring.loggingPath")
 	TransactionsHandlerName                       = ffc("transactions.handler.name")
 	TransactionsMaxHistoryCount                   = ffc("transactions.maxHistoryCount")
 	TransactionsNonceStateTimeout                 = ffc("transactions.nonceStateTimeout")
@@ -130,6 +131,7 @@ func setDefaults() {
 
 	viper.SetDefault(string(MonitoringEnabled), false)
 	viper.SetDefault(string(MonitoringMetricsPath), "/metrics")
+	viper.SetDefault(string(MonitoringLoggingPath), "/logging")
 
 	viper.SetDefault(string(APIPassthroughHeaders), []string{})
 	viper.SetDefault(string(DeprecatedPolicyEngineName), "simple")
