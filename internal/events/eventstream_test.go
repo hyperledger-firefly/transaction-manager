@@ -358,6 +358,7 @@ func TestWebSocketEventStreamsE2EMigrationThenStart(t *testing.T) {
 		r := args[1].(*ffcapi.EventStreamStartRequest)
 		started <- r
 		assert.Len(t, r.InitialListeners, 1)
+		assert.Equal(t, uint64(20) /* the confirmations.required default */, r.RequiredConfirmations)
 		assert.JSONEq(t, `{
 			"event": {"event":"definition"},
 			"address": "0x12345"

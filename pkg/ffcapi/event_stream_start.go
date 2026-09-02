@@ -23,11 +23,12 @@ import (
 )
 
 type EventStreamStartRequest struct {
-	ID               *fftypes.UUID              // UUID of the stream, which we be referenced in any future add/remove listener requests
-	StreamContext    context.Context            // Context that will be cancelled when the event stream needs to stop - no further events will be consumed after this, so all pushes to the stream should select on the done channel too
-	EventStream      chan<- *ListenerEvent      // The event stream to push events to as they are detected, and checkpoints regularly even if there are no events - remember to select on Done as well when pushing events
-	BlockListener    chan<- *BlockHashEvent     // The connector should push new blocks to every stream, marking if it's possible blocks were missed (due to reconnect). The stream guarantees to always consume from this channel, until the stream context closes.
-	InitialListeners []*EventListenerAddRequest // Initial list of event listeners to start with the stream - allows these to be started concurrently
+	ID                    *fftypes.UUID              // UUID of the stream, which we be referenced in any future add/remove listener requests
+	StreamContext         context.Context            // Context that will be cancelled when the event stream needs to stop - no further events will be consumed after this, so all pushes to the stream should select on the done channel too
+	EventStream           chan<- *ListenerEvent      // The event stream to push events to as they are detected, and checkpoints regularly even if there are no events - remember to select on Done as well when pushing events
+	BlockListener         chan<- *BlockHashEvent     // The connector should push new blocks to every stream, marking if it's possible blocks were missed (due to reconnect). The stream guarantees to always consume from this channel, until the stream context closes.
+	InitialListeners      []*EventListenerAddRequest // Initial list of event listeners to start with the stream - allows these to be started concurrently
+	RequiredConfirmations uint64                     // The number of confirmations the confirmation manager will require before dispatching each event on this stream - connectors that cannot track forks (light chain tracking) may use this to gate event delivery
 }
 
 type EventStreamStartResponse struct {

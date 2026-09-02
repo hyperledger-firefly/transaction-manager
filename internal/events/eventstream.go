@@ -667,12 +667,17 @@ func (es *eventStream) start(ctx context.Context, apiManagedCheckpoint *apitypes
 		}
 	}
 	startedState.blocks, startedState.blockListenerDone = blocklistener.BufferChannel(startedState.ctx, es.confirmations)
+	requiredConfirmations := uint64(0)
+	if es.confirmationsRequired > 0 {
+		requiredConfirmations = uint64(es.confirmationsRequired)
+	}
 	_, _, err := es.connector.EventStreamStart(startedState.ctx, &ffcapi.EventStreamStartRequest{
-		ID:               es.spec.ID,
-		EventStream:      startedState.updates,
-		StreamContext:    startedState.ctx,
-		BlockListener:    startedState.blocks,
-		InitialListeners: initialEventListeners,
+		ID:                    es.spec.ID,
+		EventStream:           startedState.updates,
+		StreamContext:         startedState.ctx,
+		BlockListener:         startedState.blocks,
+		InitialListeners:      initialEventListeners,
+		RequiredConfirmations: requiredConfirmations,
 	})
 	if err != nil {
 		es.currentState = nil
