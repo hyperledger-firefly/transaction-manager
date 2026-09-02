@@ -42,17 +42,22 @@ func BufferChannel(ctx context.Context, target NewBlockHashConsumer) (buffered c
 	go func() {
 		defer close(done)
 		var blockedUpdate *ffcapi.BlockHashEvent
+		var blockedDiscardCount int
 		for {
 			if blockedUpdate != nil {
 				select {
 				case blockUpdate := <-buffered:
 					// Have to discard this
 					blockedUpdate.GapPotential = true // there is a gap for sure at this point
-					log.L(ctx).Debugf("Blocked event stream missed new block event: %v", blockUpdate.BlockHashes)
+					blockedDiscardCount++
+					log.L(ctx).Debugf("Blocked event stream missed new block event headBlock=%d discardCount=%d hashes=%v",
+						blockUpdate.HeadBlockNumber, blockedDiscardCount, blockUpdate.BlockHashes)
 				case target.GetReceiveChannel() <- blockedUpdate:
 					// We're not blocked any more
-					log.L(ctx).Infof("Event stream block-listener unblocked")
+					log.L(ctx).Infof("Event stream block-listener unblocked headBlock=%d discardedWhileBlocked=%d",
+						blockedUpdate.HeadBlockNumber, blockedDiscardCount)
 					blockedUpdate = nil
+					blockedDiscardCount = 0
 				case <-ctx.Done():
 					log.L(ctx).Debugf("Block listener exiting (previously blocked)")
 					return
@@ -68,7 +73,8 @@ func BufferChannel(ctx context.Context, target NewBlockHashConsumer) (buffered c
 							// all good, we passed it on
 						default:
 							// we can't deliver it immediately, we switch to blocked mode
-							log.L(ctx).Infof("Event stream block-listener became blocked")
+							log.L(ctx).Infof("Event stream block-listener became blocked headBlock=%d downstreamQueueFull=true",
+								update.HeadBlockNumber)
 							// Take a copy of the block update, so we can modify (to mark a gap) without affecting other streams
 							var bu = *update
 							blockedUpdate = &bu

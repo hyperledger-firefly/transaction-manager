@@ -43,7 +43,7 @@ type receiptChecker struct {
 	cond           *sync.Cond
 	entries        *list.List
 	metricsEmitter metrics.ReceiptCheckerMetricsEmitter
-	notify         func(*pendingItem, *ffcapi.TransactionReceiptResponse)
+	notify         func(*pendingItem, *ffcapi.TransactionReceiptResponse, uint64)
 }
 
 func newReceiptChecker(bcm *blockConfirmationManager, workerCount int, rcme metrics.ReceiptCheckerMetricsEmitter) *receiptChecker {
@@ -52,11 +52,12 @@ func newReceiptChecker(bcm *blockConfirmationManager, workerCount int, rcme metr
 		workerCount:    workerCount,
 		workersDone:    make([]chan struct{}, workerCount),
 		metricsEmitter: rcme,
-		notify: func(pending *pendingItem, receipt *ffcapi.TransactionReceiptResponse) {
+		notify: func(pending *pendingItem, receipt *ffcapi.TransactionReceiptResponse, receiptGeneration uint64) {
 			_ = bcm.Notify(&Notification{
-				NotificationType: receiptArrived,
-				pending:          pending,
-				receipt:          receipt,
+				NotificationType:  receiptArrived,
+				pending:           pending,
+				receipt:           receipt,
+				receiptGeneration: receiptGeneration,
 			})
 		},
 	}
@@ -100,6 +101,9 @@ func (rc *receiptChecker) run(i int) {
 			if pending == nil {
 				return false /* exit the retry loop with err */, i18n.NewError(ctx, tmmsgs.MsgShuttingDown)
 			}
+			rc.cond.L.Lock()
+			checkGeneration := pending.receiptGeneration
+			rc.cond.L.Unlock()
 
 			res, reason, receiptErr := rc.bcm.connector.TransactionReceipt(ctx, &ffcapi.TransactionReceiptRequest{
 				TransactionHash: pending.transactionHash,
@@ -127,7 +131,7 @@ func (rc *receiptChecker) run(i int) {
 			// Dispatch the receipt back to the main routine.
 			if res != nil {
 				rc.metricsEmitter.RecordReceiptCheckMetrics(ctx, "notified", time.Since(startTime).Seconds())
-				rc.notify(pending, res)
+				rc.notify(pending, res, checkGeneration)
 			} else {
 				rc.metricsEmitter.RecordReceiptCheckMetrics(ctx, "empty", time.Since(startTime).Seconds())
 			}
@@ -148,6 +152,7 @@ func (rc *receiptChecker) schedule(pending *pendingItem, suspectedTimeout bool) 
 		rc.cond.L.Unlock()
 		return
 	}
+	pending.receiptGeneration++
 	pending.queuedStale = rc.entries.PushBack(pending)
 	pending.scheduledAtLeastOnce = true
 	rc.cond.Signal()

@@ -62,12 +62,13 @@ const (
 )
 
 type Notification struct {
-	NotificationType NotificationType
-	Event            *EventInfo                         // NewEventLog, RemovedEventLog
-	Transaction      *TransactionInfo                   // NewTransaction, RemovedTransaction
-	RemovedListener  *RemovedListenerInfo               // ListenerRemoved
-	pending          *pendingItem                       // receiptArrived
-	receipt          *ffcapi.TransactionReceiptResponse // receiptArrived
+	NotificationType  NotificationType
+	Event             *EventInfo                         // NewEventLog, RemovedEventLog
+	Transaction       *TransactionInfo                   // NewTransaction, RemovedTransaction
+	RemovedListener   *RemovedListenerInfo               // ListenerRemoved
+	pending           *pendingItem                       // receiptArrived
+	receipt           *ffcapi.TransactionReceiptResponse // receiptArrived
+	receiptGeneration uint64                             // receiptArrived
 }
 
 type EventInfo struct {
@@ -156,6 +157,8 @@ type pendingItem struct {
 	previousConfirmationCount *uint64       // headBlockNumber mode: last dispatched CurrentConfirmationCount
 	queuedStale               *list.Element // protected by receiptChecker mux
 	lastReceiptCheck          time.Time     // protected by receiptChecker mux
+	receiptGeneration         uint64        // protected by receiptChecker mux, incremented on each schedule
+	appliedReceiptGeneration  uint64        // last receipt generation applied by confirmationsListener
 	receiptCallback           func(ctx context.Context, receipt *ffcapi.TransactionReceiptResponse)
 	confirmationsCallback     func(ctx context.Context, notification *apitypes.ConfirmationsNotification)
 	transactionHash           string
@@ -237,8 +240,12 @@ func (bcm *blockConfirmationManager) Stop() {
 	if bcm.done != nil {
 		bcm.cancelFunc()
 		bcm.receiptChecker.close()
-		bcm.receiptChecker = nil
+		// Wait for confirmationsListener to actually observe ctx.Done() and return before
+		// nil-ing out receiptChecker - its select also has newBlockHashEvents/bcmNotifications
+		// cases, so a buffered event can still win a race against ctx.Done() and drive one more
+		// loop iteration that calls into receiptChecker (e.g. via scheduleReceiptChecks).
 		<-bcm.done
+		bcm.receiptChecker = nil
 		bcm.done = nil
 		// Reset context ready for restart
 		bcm.ctx, bcm.cancelFunc = context.WithCancel(bcm.baseContext)
@@ -276,6 +283,13 @@ func (bcm *blockConfirmationManager) Notify(n *Notification) error {
 			log.L(bcm.ctx).Errorf("Invalid receipt notification: %+v", n)
 			return i18n.NewError(bcm.ctx, tmmsgs.MsgInvalidConfirmationRequest, n)
 		}
+	}
+	queueCap := cap(bcm.bcmNotifications)
+	queueLen := len(bcm.bcmNotifications)
+	if queueLen >= queueCap {
+		log.L(bcm.ctx).Warnf("Confirmation notification queue full (%d/%d), blocking on type=%s", queueLen, queueCap, n.NotificationType)
+	} else if queueLen >= queueCap-1 {
+		log.L(bcm.ctx).Warnf("Confirmation notification queue nearly full (%d/%d) type=%s", queueLen, queueCap, n.NotificationType)
 	}
 	select {
 	case bcm.bcmNotifications <- n:
@@ -374,6 +388,12 @@ func (bcm *blockConfirmationManager) confirmationsListener() {
 			if bhe.GapPotential {
 				bcm.blockListenerStale = true
 			}
+			blockQueueDepth := len(bcm.newBlockHashEvents)
+			blockQueueCap := cap(bcm.newBlockHashEvents)
+			if blockQueueDepth >= blockQueueCap-1 {
+				log.L(bcm.ctx).Warnf("Confirmation block event queue nearly full (%d/%d) headBlock=%d gapPotential=%t",
+					blockQueueDepth, blockQueueCap, bhe.HeadBlockNumber, bhe.GapPotential)
+			}
 			blockHashes = append(blockHashes, bhe.BlockHashes...)
 			bcm.headBlockNumber = bhe.HeadBlockNumber // always update the head block number, NOTE: the number can decrease during a re-org
 			// Need to also pass this event to any confirmed block listeners
@@ -403,6 +423,13 @@ func (bcm *blockConfirmationManager) confirmationsListener() {
 			}
 		}
 		startTime := time.Now()
+		bcm.pendingMux.Lock()
+		pendingItemCount := len(bcm.pending)
+		bcm.pendingMux.Unlock()
+		blockHashCount := len(blockHashes)
+		notificationCount := len(notifications)
+		log.L(bcm.ctx).Debugf("Confirmation listener iteration starting trigger=%s blockHashes=%d notifications=%d pendingItems=%d headBlock=%d blockQueueDepth=%d notificationQueueDepth=%d",
+			triggerType, blockHashCount, notificationCount, pendingItemCount, bcm.headBlockNumber, len(bcm.newBlockHashEvents), len(bcm.bcmNotifications))
 
 		// Each time round the loop we need to have a consistent view of the chain.
 		// This view must not add later blocks (by number) in, or change the hash of blocks,
@@ -421,13 +448,11 @@ func (bcm *blockConfirmationManager) confirmationsListener() {
 			bcm.blockListenerStale = false
 		}
 
-		blockHashCount := len(blockHashes)
+		newBlockEvent := triggerType == "newBlockHashes"
 		// Process each new block
-		bcm.processBlockHashes(blockHashes)
+		bcm.processBlockHashes(blockHashes, newBlockEvent)
 		// Truncate the block hashes now we've processed them
 		blockHashes = blockHashes[:0]
-
-		notificationCount := len(notifications)
 
 		// Process any new notifications - we do this at the end, so it can benefit
 		// from knowing the latest highestBlockSeen
@@ -439,24 +464,43 @@ func (bcm *blockConfirmationManager) confirmationsListener() {
 			continue
 		}
 		scheduleAllTxReceipts := !receivedFirstBlock && blockHashCount > 0
+		if bcm.chainTrackingMode == ffcapi.ChainTrackingModeLight {
+			// in light mode, we need to schedule all transactions if we have received any blocks
+			// this is because in light mode, we do not have block details available to check transaction hashes against
+			scheduleAllTxReceipts = scheduleAllTxReceipts || newBlockEvent
+		}
 		// Mark receipts stale after duration
 		bcm.scheduleReceiptChecks(scheduleAllTxReceipts)
 		receivedFirstBlock = receivedFirstBlock || blockHashCount > 0
-		log.L(bcm.ctx).Tracef("[TimeTrace] Confirmation listener processed %d block hashes and %d notifications in %s, trigger type: %s", blockHashCount, notificationCount, time.Since(startTime), triggerType)
-
+		iterationDuration := time.Since(startTime)
+		log.L(bcm.ctx).Debugf("Confirmation listener iteration complete trigger=%s duration=%s blockHashes=%d notifications=%d pendingItems=%d headBlock=%d blockQueueDepth=%d notificationQueueDepth=%d",
+			triggerType, iterationDuration, blockHashCount, notificationCount, pendingItemCount, bcm.headBlockNumber, len(bcm.newBlockHashEvents), len(bcm.bcmNotifications))
+		log.L(bcm.ctx).Tracef("[TimeTrace] Confirmation listener processed %d block hashes and %d notifications in %s, trigger type: %s", blockHashCount, notificationCount, iterationDuration, triggerType)
 	}
 
 }
 
-func (bcm *blockConfirmationManager) scheduleReceiptChecks(receivedBlocksFirstTime bool) {
+func (bcm *blockConfirmationManager) scheduleReceiptChecks(scheduleUnreceiptedItems bool) {
 	now := time.Now()
+	// In light mode there is no way to know which block (if any) will contain a given pending
+	// transaction - unlike full mode, which actively detects a mined transaction by scanning each
+	// new block's transaction list (processBlock). So in light mode, an item that still has no
+	// receipt must be retried on every new block, not just scheduled once - otherwise a "not found"
+	// result on the first check would fall all the way back to the (much slower) stale-timeout for
+	// every subsequent attempt. This is deliberately restricted to light mode: applying it in full
+	// mode as well would race against processBlock's own scheduling of the same item (verified by
+	// reproducing a duplicate in-flight receipt check against TestBlockConfirmationManagerE2ETransactionMovedFork).
+	retryUnreceiptedLightModeItems := scheduleUnreceiptedItems && bcm.chainTrackingMode == ffcapi.ChainTrackingModeLight
 	for _, pending := range bcm.pending {
 		// For efficiency we do a dirty read on the receipt check time before going into the locking
 		// check within the receipt checker
 		if pending.pType == pendingTypeTransaction {
-			if receivedBlocksFirstTime && !pending.scheduledAtLeastOnce {
+			switch {
+			case scheduleUnreceiptedItems && !pending.scheduledAtLeastOnce:
 				bcm.receiptChecker.schedule(pending, false)
-			} else if now.Sub(pending.lastReceiptCheck) > bcm.staleReceiptTimeout {
+			case retryUnreceiptedLightModeItems && pending.blockHash == "":
+				bcm.receiptChecker.schedule(pending, false)
+			case now.Sub(pending.lastReceiptCheck) > bcm.staleReceiptTimeout:
 				// schedule stale receipt checks
 				bcm.receiptChecker.schedule(pending, true /* suspected timeout - prompts re-check in the lock */)
 			}
@@ -489,7 +533,7 @@ func (bcm *blockConfirmationManager) processNotifications(notifications []*Notif
 		case RemovedTransaction:
 			bcm.removeItem(n.transactionPendingItem(), true)
 		case receiptArrived:
-			bcm.dispatchReceipt(n.pending, n.receipt, blocks)
+			bcm.dispatchReceipt(n.pending, n.receipt, n.receiptGeneration, blocks)
 		default:
 			// Note that streamStopped is handled in the polling loop directly
 			log.L(bcm.ctx).Warnf("Unexpected notification type: %s", n.NotificationType)
@@ -501,7 +545,17 @@ func (bcm *blockConfirmationManager) processNotifications(notifications []*Notif
 	return notifications[:0], nil
 }
 
-func (bcm *blockConfirmationManager) dispatchReceipt(pending *pendingItem, receipt *ffcapi.TransactionReceiptResponse, blocks *blockState) {
+// NOTE: there is no locking in this function
+// relies on the consumer logic to not call this function concurrently
+func (bcm *blockConfirmationManager) dispatchReceipt(pending *pendingItem, receipt *ffcapi.TransactionReceiptResponse, receiptGeneration uint64, blocks *blockState) {
+	if receiptGeneration > 0 && receiptGeneration <= pending.appliedReceiptGeneration {
+		log.L(bcm.ctx).Debugf("Ignoring stale receipt for transaction %s (actual_generation=%d applied_generation=%d)",
+			pending.transactionHash, receiptGeneration, pending.appliedReceiptGeneration)
+		return
+	}
+	if receiptGeneration > 0 {
+		pending.appliedReceiptGeneration = receiptGeneration
+	}
 	pending.blockNumber = receipt.BlockNumber.Uint64()
 	pending.blockHash = receipt.BlockHash
 	log.L(bcm.ctx).Infof("Receipt for transaction %s downloaded. BlockNumber=%d BlockHash=%s", pending.transactionHash, pending.blockNumber, pending.blockHash)
@@ -555,9 +609,13 @@ func (bcm *blockConfirmationManager) removeItem(pending *pendingItem, stale bool
 	bcm.pendingMux.Unlock()
 }
 
-func (bcm *blockConfirmationManager) processBlockHashes(blockHashes []string) {
+func (bcm *blockConfirmationManager) processBlockHashes(blockHashes []string, newBlockEvent bool) {
 	if bcm.chainTrackingMode == ffcapi.ChainTrackingModeLight {
 		// for light chain tracking mode, no block details are available, only need to calculate the number of confirmations using head block number
+		if !newBlockEvent {
+			// if this function was not triggered by a new block event, we do not need to process any pending transactions
+			return
+		}
 		bcm.checkAndDispatchConfirmationsUsingBlockHeight()
 		return
 	}
@@ -841,7 +899,9 @@ func (bcm *blockConfirmationManager) checkAndDispatchConfirmationsUsingBlockHeig
 	for _, p := range bcm.pending {
 		items = append(items, p)
 	}
+	headBlock := bcm.headBlockNumber
 	bcm.pendingMux.Unlock()
+	log.L(bcm.ctx).Debugf("Checking block height confirmations for %d pending items headBlock=%d", len(items), headBlock)
 	for _, p := range items {
 		if err := bcm.confirmationCheckUsingHeadBlockNumber(p); err != nil {
 			log.L(bcm.ctx).Errorf("Block height confirmation refresh failed for %s: %s", p.getKey(), err)
@@ -877,7 +937,9 @@ func (bcm *blockConfirmationManager) dispatchBlockHeightConfirmations(pending *p
 
 	confirmed := confirmationCount == bcm.requiredConfirmations
 	if confirmed {
+		receiptValidationStartTime := time.Now()
 		// do confirmation check here to ensure the transaction receipt is still valid
+		log.L(bcm.ctx).Debugf("Validating transaction receipt on confirmation listener item=%s", pending.getKey())
 		res, reason, err := bcm.connector.TransactionReceipt(bcm.ctx, &ffcapi.TransactionReceiptRequest{
 			TransactionHash: pending.transactionHash,
 		})
@@ -888,6 +950,8 @@ func (bcm *blockConfirmationManager) dispatchBlockHeightConfirmations(pending *p
 				pending.blockNumber = 0
 				pending.previousConfirmationCount = nil
 				bcm.receiptChecker.schedule(pending, true)
+			} else {
+				log.L(bcm.ctx).Errorf("Confirmation listener receipt validation failed item=%s duration=%s: %s", pending.getKey(), time.Since(receiptValidationStartTime), err)
 			}
 			return err
 		}

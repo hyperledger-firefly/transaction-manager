@@ -1091,8 +1091,51 @@ func TestProcessBlockHashesLookupFail(t *testing.T) {
 
 	bcm.processBlockHashes([]string{
 		blockHash,
-	})
+	}, true)
 
+	mca.AssertExpectations(t)
+}
+
+// TestProcessBlockHashesLightModeDoesNotSweepOnNotificationOnlyTrigger is the regression test for
+// the confirmation-manager stall under sustained 429s: in light chain-tracking mode, a loop
+// iteration triggered only by a notification (e.g. a receiptArrived from the receipt-checker pool,
+// or a new transaction being tracked) must not re-run the full confirmation sweep over every
+// pending item - only an actual new block event should. Before the fix, this alone would call
+// TransactionReceipt for every pending item on every notification, an O(N x M) cost that degrades
+// into an unrecoverable backlog under load.
+func TestProcessBlockHashesLightModeDoesNotSweepOnNotificationOnlyTrigger(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+	emm := &metricsmocks.EventMetricsEmitter{}
+	bcm.receiptChecker = newReceiptChecker(bcm, 0, emm)
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+	blockHash := "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542"
+	bcm.headBlockNumber = 1004
+	pending := &pendingItem{
+		pType:           pendingTypeTransaction,
+		transactionHash: txHash,
+		blockHash:       blockHash,
+		blockNumber:     1001, // 1004-1001 == the 3 confirmations required by newTestBlockConfirmationManagerHeadBlockNumber()
+		confirmationsCallback: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
+		},
+	}
+	bcm.pending[pending.getKey()] = pending
+
+	bcm.processBlockHashes(nil, false /* notification-only trigger */)
+	mca.AssertNotCalled(t, "TransactionReceipt", mock.Anything, mock.Anything)
+
+	// A genuine new block event must still trigger the sweep - even though light mode block events
+	// carry no populated block hashes, only a head number bump (newBlockEvent=true is the correct
+	// signal, not len(blockHashes)).
+	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
+		return r.TransactionHash == txHash
+	})).Return(&ffcapi.TransactionReceiptResponse{
+		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
+			BlockNumber: fftypes.NewFFBigInt(1001),
+			BlockHash:   blockHash,
+		},
+	}, ffcapi.ErrorReason(""), nil).Once()
+	bcm.processBlockHashes(nil, true /* new block event */)
 	mca.AssertExpectations(t)
 }
 
@@ -1233,7 +1276,7 @@ func TestCheckReceiptImmediateConfirm(t *testing.T) {
 		},
 	}
 	blocks := bcm.newBlockState()
-	go bcm.dispatchReceipt(pending, receipt, blocks)
+	go bcm.dispatchReceipt(pending, receipt, 1, blocks)
 
 	<-done
 }
@@ -1263,7 +1306,47 @@ func TestCheckReceiptWalkFail(t *testing.T) {
 		},
 	}
 	blocks := bcm.newBlockState()
-	bcm.dispatchReceipt(pending, receipt, blocks)
+	bcm.dispatchReceipt(pending, receipt, 1, blocks)
+}
+
+func TestDispatchReceiptIgnoresStaleGeneration(t *testing.T) {
+
+	bcm, mca := newTestBlockConfirmationManager()
+	mca.On("BlockInfoByNumber", mock.Anything, mock.MatchedBy(func(r *ffcapi.BlockInfoByNumberRequest) bool {
+		return r.BlockNumber.Uint64() == 1002
+	})).Return(nil, ffcapi.ErrorReasonNotFound, fmt.Errorf("not found"))
+
+	forkA := &ffcapi.TransactionReceiptResponse{
+		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
+			BlockNumber: fftypes.NewFFBigInt(1001),
+			BlockHash:   "0xea681fadcf56ee6254a0d30b255c56636ee9199c73c45f0dd5823759b2ad1ef8",
+		},
+	}
+	forkB := &ffcapi.TransactionReceiptResponse{
+		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
+			BlockNumber: fftypes.NewFFBigInt(1001),
+			BlockHash:   "0x33eb56730878a08e126f2d52b19242d3b3127dc7611447255928be91b2dda455",
+		},
+	}
+
+	txHash := "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+	pending := &pendingItem{
+		pType:           pendingTypeTransaction,
+		transactionHash: txHash,
+	}
+	blocks := bcm.newBlockState()
+
+	// Newer receipt applied first (as can happen when receiptArrived notifications arrive out of order).
+	bcm.dispatchReceipt(pending, forkB, 2, blocks)
+	assert.Equal(t, forkB.BlockHash, pending.blockHash)
+	assert.Equal(t, uint64(2), pending.appliedReceiptGeneration)
+
+	// Older in-flight receipt must not overwrite the newer one.
+	bcm.dispatchReceipt(pending, forkA, 1, blocks)
+	assert.Equal(t, forkB.BlockHash, pending.blockHash)
+	assert.Equal(t, uint64(2), pending.appliedReceiptGeneration)
+
+	mca.AssertExpectations(t)
 }
 
 func TestScheduleReceiptCheck(t *testing.T) {
@@ -1297,6 +1380,67 @@ func TestScheduleReceiptCheck(t *testing.T) {
 
 	assert.Equal(t, bcm.receiptChecker.entries.Len(), 2)
 
+}
+
+// TestScheduleReceiptChecksLightModeRetriesUnreceiptedItemsEveryBlock is the regression test for
+// why light mode must retry an outstanding receipt check on every new block: unlike full mode
+// (which actively detects a mined transaction by scanning each new block's transaction list, see
+// processBlock), light mode has no way to know which block will contain a given pending
+// transaction. So an item that already had its first check (scheduledAtLeastOnce=true) but got
+// "not found" - still no blockHash - must be retried on the very next block, not left to wait for
+// the 60s stale-receipt-timeout.
+func TestScheduleReceiptChecksLightModeRetriesUnreceiptedItemsEveryBlock(t *testing.T) {
+
+	bcm, _ := newTestBlockConfirmationManagerHeadBlockNumber() // light mode
+	emm := &metricsmocks.EventMetricsEmitter{}
+	bcm.receiptChecker = newReceiptChecker(bcm, 0, emm)
+
+	pendingNoReceiptYet := &pendingItem{ // already checked once, "not found" - must be retried
+		pType:                pendingTypeTransaction,
+		lastReceiptCheck:     time.Now(), // just checked - nowhere near the stale-timeout
+		transactionHash:      "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+		scheduledAtLeastOnce: true,
+		blockHash:            "",
+	}
+	pendingAlreadyHasReceipt := &pendingItem{ // already has a receipt - not this path's concern
+		pType:                pendingTypeTransaction,
+		lastReceiptCheck:     time.Now(),
+		transactionHash:      "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7",
+		scheduledAtLeastOnce: true,
+		blockHash:            "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542",
+	}
+	bcm.pending[pendingNoReceiptYet.getKey()] = pendingNoReceiptYet
+	bcm.pending[pendingAlreadyHasReceipt.getKey()] = pendingAlreadyHasReceipt
+
+	bcm.scheduleReceiptChecks(true) // simulates a new light-mode block event
+
+	assert.Equal(t, 1, bcm.receiptChecker.entries.Len())
+	assert.Equal(t, pendingNoReceiptYet, bcm.receiptChecker.entries.Front().Value.(*pendingItem))
+}
+
+// TestScheduleReceiptChecksFullModeDoesNotRetryUnreceiptedItems is the guard test for the race we
+// found and reverted: applying the light-mode retry-every-block behavior in full mode too would
+// race against processBlock's own active scheduling of the same item (it caused a duplicate
+// in-flight receipt check against TestBlockConfirmationManagerE2ETransactionMovedFork). Full mode
+// must only ever schedule a not-yet-scheduled item, never re-trigger on blockHash=="" alone.
+func TestScheduleReceiptChecksFullModeDoesNotRetryUnreceiptedItems(t *testing.T) {
+
+	bcm, _ := newTestBlockConfirmationManager() // full mode
+	emm := &metricsmocks.EventMetricsEmitter{}
+	bcm.receiptChecker = newReceiptChecker(bcm, 0, emm)
+
+	pendingAlreadyScheduledNoReceiptYet := &pendingItem{
+		pType:                pendingTypeTransaction,
+		lastReceiptCheck:     time.Now(), // just checked - nowhere near the stale-timeout
+		transactionHash:      "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+		scheduledAtLeastOnce: true,
+		blockHash:            "",
+	}
+	bcm.pending[pendingAlreadyScheduledNoReceiptYet.getKey()] = pendingAlreadyScheduledNoReceiptYet
+
+	bcm.scheduleReceiptChecks(true)
+
+	assert.Equal(t, 0, bcm.receiptChecker.entries.Len())
 }
 
 func TestBlockState(t *testing.T) {
@@ -1825,4 +1969,69 @@ func TestBlockConfirmationManagerHeadBlockNumberNoOpWithoutReceipt(t *testing.T)
 
 	bcm.Stop()
 	mca.AssertExpectations(t)
+}
+
+// TestBlockConfirmationManagerLightModeChecksReceiptOnNextBlockNotStaleTimeout is the end-to-end
+// regression test for the light-mode performance fix: a transaction added to an already-running
+// light-mode manager (i.e. not the very first block the manager has ever seen - matching the real
+// scenario where transactions arrive continuously over a long-running process) must have its
+// receipt checked on the very next new block event, not have to wait for the default 60s
+// stale-receipt-timeout.
+func TestBlockConfirmationManagerLightModeChecksReceiptOnNextBlockNotStaleTimeout(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+	config.Set(tmconfig.ConfirmationsReceiptWorkers, 1) // need a real worker to consume the schedule
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+	blockHash := "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542"
+
+	receiptChecked := make(chan struct{}, 1)
+	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
+		return r.TransactionHash == txHash
+	})).Run(func(mock.Arguments) {
+		receiptChecked <- struct{}{}
+	}).Return(&ffcapi.TransactionReceiptResponse{
+		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
+			BlockNumber: fftypes.NewFFBigInt(1001),
+			BlockHash:   blockHash,
+		},
+	}, ffcapi.ErrorReason(""), nil).Maybe()
+
+	bcm.Start()
+	ch := bcm.GetReceiveChannel()
+
+	// Establish the manager's head well before the transaction even exists - this is deliberately
+	// NOT "the first block ever", matching how a long-running process actually behaves.
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 900}
+
+	assert.NoError(t, bcm.Notify(&Notification{
+		NotificationType: NewTransaction,
+		Transaction: &TransactionInfo{
+			TransactionHash: txHash,
+			Receipt:         func(ctx context.Context, receipt *ffcapi.TransactionReceiptResponse) {},
+			Confirmations:   func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {},
+		},
+	}))
+
+	// The NewTransaction notification and the block events travel over separate channels, so wait
+	// for it to actually land in bcm.pending before sending the block event that's supposed to
+	// trigger its receipt check - otherwise the two channels can race and the block event could be
+	// (and, roughly 1 in 5 test runs, was) consumed before the notification, making this test flaky
+	// for a reason that has nothing to do with the behavior under test.
+	pendingKey := pendingKeyForTX(txHash)
+	assert.Eventually(t, func() bool {
+		bcm.pendingMux.Lock()
+		defer bcm.pendingMux.Unlock()
+		return bcm.pending[pendingKey] != nil
+	}, time.Second, 5*time.Millisecond)
+
+	// A single subsequent new block event is all it should take.
+	ch <- &ffcapi.BlockHashEvent{HeadBlockNumber: 901}
+
+	select {
+	case <-receiptChecked:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for TransactionReceipt to be checked - should not need to wait for the stale-receipt-timeout")
+	}
+
+	bcm.Stop()
 }
