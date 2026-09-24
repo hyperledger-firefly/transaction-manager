@@ -525,9 +525,14 @@ func (bcm *blockConfirmationManager) processNotifications(notifications []*Notif
 				// so leave this one to checkAndDispatchConfirmationsUsingBlockHeight, which dispatches in order
 				log.L(bcm.ctx).Debugf("Deferring confirmation check for %s until earlier pending events of the listener", newItem.getKey())
 			} else if err := bcm.walkChainForItem(newItem, blocks); err != nil {
-				// If we error, we should return the remaining notifications to be processed later
-				// so that the calling function can remove the ones that were processed successfully
-				// This still guarantees ordering of the notifications that were processed successfully
+				// Only one of the pending item or a kept notification may retry this, or the event is dispatched twice.
+				// Light mode keeps the item: the head block sweep recomputes it from scratch, in order.
+				// Full mode keeps the notification: processBlock only extends confirmations from the last block
+				// found, so only a fresh walk can fill the gap a failed walk leaves.
+				if bcm.chainTrackingMode == ffcapi.ChainTrackingModeLight {
+					log.L(bcm.ctx).Debugf("Leaving %s to be retried on the next head block: %s", newItem.getKey(), err)
+					break
+				}
 				return notifications[i:], err
 			}
 		case NewTransaction:

@@ -2291,3 +2291,34 @@ func TestBlockConfirmationManagerHeadBlockNumberNewEventWaitsForEarlierFailedEve
 	assert.Equal(t, []uint64{1000, 1001}, confirmed)
 	assert.Empty(t, bcm.pending)
 }
+
+// TestBlockConfirmationManagerHeadBlockNumberNewEventValidationFailureDispatchedOnce checks that a new
+// event which fails receipt validation on arrival is confirmed exactly once. The item is already in
+// bcm.pending, so the notification must not also be kept for a retry: otherwise the head block sweep
+// confirms the pending item, and the retried notification re-adds and confirms the same event again.
+// The failure must also not hold up notifications for other listeners.
+func TestBlockConfirmationManagerHeadBlockNumberNewEventValidationFailureDispatchedOnce(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+
+	var confirmed []uint64
+	listener1, listener2 := fftypes.NewUUID(), fftypes.NewUUID()
+
+	// Both events arrive already past 3 confirmations. Validation of block 1000 fails once
+	bcm.headBlockNumber = 1005
+	remaining, err := bcm.processNotifications([]*Notification{
+		lightModeOrderingTestEvent(mca, listener1, 1000, 1, &confirmed),
+		lightModeOrderingTestEvent(mca, listener2, 1001, 0, &confirmed),
+	}, bcm.newBlockState())
+	assert.NoError(t, err)
+	assert.Empty(t, remaining)
+	assert.Equal(t, []uint64{1001}, confirmed)
+
+	// Next head block, block 1000 validates and is confirmed once
+	bcm.headBlockNumber = 1006
+	bcm.checkAndDispatchConfirmationsUsingBlockHeight()
+	remaining, err = bcm.processNotifications(remaining, bcm.newBlockState())
+	assert.NoError(t, err)
+	assert.Empty(t, remaining)
+	assert.Equal(t, []uint64{1001, 1000}, confirmed)
+	assert.Empty(t, bcm.pending)
+}
