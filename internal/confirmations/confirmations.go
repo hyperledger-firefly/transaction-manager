@@ -548,6 +548,17 @@ func (bcm *blockConfirmationManager) processNotifications(notifications []*Notif
 // NOTE: there is no locking in this function
 // relies on the consumer logic to not call this function concurrently
 func (bcm *blockConfirmationManager) dispatchReceipt(pending *pendingItem, receipt *ffcapi.TransactionReceiptResponse, receiptGeneration uint64, blocks *blockState) {
+	// The item might have been confirmed, removed or replaced while this receipt was in flight.
+	// In light mode where checks are regularly scheduled due to lack of visibility of block information
+	// a second check can be scheduled before the first receipt is processed easily, so applying a receipt
+	// to an item we no longer track would dispatch it again.
+	bcm.pendingMux.Lock()
+	tracked := bcm.pending[pending.getKey()] == pending
+	bcm.pendingMux.Unlock()
+	if !tracked {
+		log.L(bcm.ctx).Debugf("Ignoring receipt for transaction %s that is no longer pending", pending.transactionHash)
+		return
+	}
 	if receiptGeneration > 0 && receiptGeneration <= pending.appliedReceiptGeneration {
 		log.L(bcm.ctx).Debugf("Ignoring stale receipt for transaction %s (actual_generation=%d applied_generation=%d)",
 			pending.transactionHash, receiptGeneration, pending.appliedReceiptGeneration)

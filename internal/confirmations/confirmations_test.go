@@ -1275,6 +1275,7 @@ func TestCheckReceiptImmediateConfirm(t *testing.T) {
 			close(done)
 		},
 	}
+	bcm.addOrReplaceItem(pending)
 	blocks := bcm.newBlockState()
 	go bcm.dispatchReceipt(pending, receipt, 1, blocks)
 
@@ -1305,6 +1306,7 @@ func TestCheckReceiptWalkFail(t *testing.T) {
 			panic("should not be called")
 		},
 	}
+	bcm.addOrReplaceItem(pending)
 	blocks := bcm.newBlockState()
 	bcm.dispatchReceipt(pending, receipt, 1, blocks)
 }
@@ -1334,6 +1336,7 @@ func TestDispatchReceiptIgnoresStaleGeneration(t *testing.T) {
 		pType:           pendingTypeTransaction,
 		transactionHash: txHash,
 	}
+	bcm.addOrReplaceItem(pending)
 	blocks := bcm.newBlockState()
 
 	// Newer receipt applied first (as can happen when receiptArrived notifications arrive out of order).
@@ -2113,4 +2116,73 @@ func TestBlockConfirmationManagerHeadBlockNumberDispatchesInBlockOrder(t *testin
 
 	bcm.Stop()
 	mca.AssertExpectations(t)
+}
+
+// TestBlockConfirmationManagerLightModeSecondReceiptDoesNotRedispatch reproduces a duplicate
+// dispatch in light mode. A worker finishes a receipt check and clears queuedStale, but its
+// receiptArrived notification has not been processed yet when the next block event arrives.
+// blockHash is still empty, so scheduleReceiptChecks schedules a second check. Both receipts then
+// get applied (the generation check only drops older ones), and if the head moves in between, the
+// already confirmed and removed item is confirmed a second time.
+func TestBlockConfirmationManagerLightModeSecondReceiptDoesNotRedispatch(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+	bcm.receiptChecker = newReceiptChecker(bcm, 0, bcm.metricsEmitter) // no workers, we drive them
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+	receipt := &ffcapi.TransactionReceiptResponse{
+		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
+			BlockNumber: fftypes.NewFFBigInt(1001),
+			BlockHash:   "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542",
+		},
+	}
+	// Receipt validation on confirmation
+	mca.On("TransactionReceipt", mock.Anything, mock.Anything).Return(receipt, ffcapi.ErrorReason(""), nil)
+
+	receiptCount := 0
+	confirmedCount := 0
+	pending := (&Notification{
+		Transaction: &TransactionInfo{
+			TransactionHash: txHash,
+			Receipt:         func(ctx context.Context, receipt *ffcapi.TransactionReceiptResponse) { receiptCount++ },
+			Confirmations: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
+				if notification.Confirmed {
+					confirmedCount++
+				}
+			},
+		},
+	}).transactionPendingItem()
+	bcm.addOrReplaceItem(pending)
+
+	// simulates a receipt worker picking up the check and finishing the TransactionReceipt call
+	workerCompletesCheck := func() uint64 {
+		p := bcm.receiptChecker.waitNext()
+		assert.Equal(t, pending, p)
+		bcm.receiptChecker.cond.L.Lock()
+		defer bcm.receiptChecker.cond.L.Unlock()
+		p.queuedStale = nil
+		return p.receiptGeneration
+	}
+
+	// Block event: first receipt check, the worker gets the receipt and queues receiptArrived
+	bcm.headBlockNumber = 1003
+	bcm.scheduleReceiptChecks(true)
+	gen1 := workerCompletesCheck()
+
+	// Next block event is processed before the receiptArrived notification
+	bcm.headBlockNumber = 1004
+	bcm.scheduleReceiptChecks(true)
+	gen2 := workerCompletesCheck()
+	assert.Greater(t, gen2, gen1)
+
+	// First receipt: 3 confirmations at head 1004, so confirmed and removed
+	bcm.dispatchReceipt(pending, receipt, gen1, bcm.newBlockState())
+	assert.Equal(t, 1, receiptCount)
+	assert.Equal(t, 1, confirmedCount)
+	assert.Empty(t, bcm.pending)
+
+	// Head moves on, then the second receipt arrives for the removed item
+	bcm.headBlockNumber = 1005
+	bcm.dispatchReceipt(pending, receipt, gen2, bcm.newBlockState())
+	assert.Equal(t, 1, receiptCount, "receipt callback fired again")
+	assert.Equal(t, 1, confirmedCount, "confirmed notification dispatched again")
 }
