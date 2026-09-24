@@ -54,6 +54,9 @@ const mtrCounterConfirmedTotalDescription = "Number of transactions confirmed"
 const mtrHistogramConfirmDuration = "confirmation_process_duration_seconds"
 const mtrHistogramConfirmDurationDescription = "Duration of confirm a transaction"
 
+const mtrCounterEventRedetectedTotal = "event_redetected_total"
+const mtrCounterEventRedetectedTotalDescription = "Number of confirmed events dropped as re-detections, being behind the checkpoint of an event already acknowledged by the receiver"
+
 const mtrCounterReceiptTotal = "receipt_processed_total"
 const mtrCounterReceiptTotalDescription = "Number of transaction receipts notified"
 const mtrHistogramReceiptDuration = "receipt_process_duration_seconds"
@@ -65,6 +68,7 @@ type EventMetricsEmitter interface {
 }
 
 type EventStreamMetricsEmitter interface {
+	RecordEventRedetectedMetric(ctx context.Context)
 }
 
 type ConfirmationMetricsEmitter interface {
@@ -116,6 +120,10 @@ func (mm *metricsManager) RecordConfirmationMetrics(ctx context.Context, duratio
 	mm.eventsMetricsManager.ObserveHistogramMetric(ctx, mtrHistogramConfirmDuration, durationInSeconds, nil)
 }
 
+func (mm *metricsManager) RecordEventRedetectedMetric(ctx context.Context) {
+	mm.eventsMetricsManager.IncCounterMetric(ctx, mtrCounterEventRedetectedTotal, nil)
+}
+
 func (mm *metricsManager) RecordReceiptMetrics(ctx context.Context, durationInSeconds float64) {
 	mm.eventsMetricsManager.IncCounterMetric(ctx, mtrCounterReceiptTotal, nil)
 	mm.eventsMetricsManager.ObserveHistogramMetric(ctx, mtrHistogramReceiptDuration, durationInSeconds, nil)
@@ -142,6 +150,8 @@ func (mm *metricsManager) InitEventMetrics() {
 
 	mm.eventsMetricsManager.NewCounterMetric(mm.ctx, mtrCounterConfirmedTotal, mtrCounterConfirmedTotalDescription, false)
 	mm.eventsMetricsManager.NewHistogramMetric(mm.ctx, mtrHistogramConfirmDuration, mtrHistogramConfirmDurationDescription, []float64{} /*fallback to default buckets*/, false)
+
+	mm.eventsMetricsManager.NewCounterMetric(mm.ctx, mtrCounterEventRedetectedTotal, mtrCounterEventRedetectedTotalDescription, false)
 
 	mm.eventsMetricsManager.NewCounterMetric(mm.ctx, mtrCounterReceiptTotal, mtrCounterReceiptTotalDescription, false)
 	mm.eventsMetricsManager.NewHistogramMetric(mm.ctx, mtrHistogramReceiptDuration, mtrHistogramReceiptDurationDescription, []float64{} /*fallback to default buckets*/, false)

@@ -399,7 +399,7 @@ func (bcm *blockConfirmationManager) confirmationsListener() {
 					blockQueueDepth, blockQueueCap, bhe.HeadBlockNumber, bhe.GapPotential)
 			}
 			blockHashes = append(blockHashes, bhe.BlockHashes...)
-			bcm.headBlockNumber = bhe.HeadBlockNumber // always update the head block number, NOTE: the number can decrease during a re-org
+			bcm.headBlockNumber = bhe.HeadBlockNumber // always update the head block number. The connector only moves it backwards for a chain reset (see ffcapi.ChainTrackingModeLight)
 			// Need to also pass this event to any confirmed block listeners
 			// (they promise to always be efficient in handling these, having a go-routine
 			// dedicated to spinning fast just processing those separate to dispatching them)
@@ -994,21 +994,48 @@ func (bcm *blockConfirmationManager) dispatchBlockHeightConfirmations(pending *p
 		log.L(bcm.ctx).Debugf("Validating transaction receipt on confirmation listener item=%s", pending.getKey())
 		res, reason, err := bcm.connector.TransactionReceipt(bcm.ctx, &ffcapi.TransactionReceiptRequest{
 			TransactionHash: pending.transactionHash,
+			//nolint:gosec // block numbers do not reach the int64 range
+			BlockNumber: fftypes.NewFFBigInt(int64(pending.blockNumber)),
 		})
 		if err != nil {
-			// All receipt check error are retried on the next head block.
-			// The item is never dropped however long this fails, as a flaky RPC endpoint cannot prove the event
-			// was orphaned. Later events of the same listener are held until it passes, so a persistent failure
-			// stalls the listener rather than losing an event.
-			// Because lack of linkage between blocks and flaky RPC endpoint, we cannot detect if the receipt is
-			// indeed orphaned or simply caused by a delayed peer.
-			log.L(bcm.ctx).Errorf("Confirmation listener receipt validation failed item=%s duration=%s reason=%s: %s", pending.getKey(), time.Since(receiptValidationStartTime), reason, err)
+			switch {
+			case reason == ffcapi.ErrorReasonNotFound && pending.pType == pendingTypeEvent:
+				// Definitive: the connector has established that the node answering is far enough past the block we
+				// saw this event in, for a null receipt to mean the transaction is not in its chain (see
+				// ffcapi.ChainTrackingModeLight). The event was orphaned by a re-org, so we drop it. If the transaction
+				// is included again the connector re-detects it under its new block hash, and it arrives as a new event.
+				// An event item is never mutated (its key includes the block) so removal is the only way to clear it,
+				// and returning nil lets later events of the listener, held behind this one, be checked in this pass.
+				log.L(bcm.ctx).Warnf("Transaction receipt not found on confirmation - dropping orphaned event item=%s duration=%s: %s", pending.getKey(), time.Since(receiptValidationStartTime), err)
+				bcm.removeItem(pending, false)
+				return nil
+			case reason == ffcapi.ErrorReasonNotFound:
+				// A transaction item is keyed by transaction hash, so we can go back to waiting for a receipt
+				pending.blockHash = ""
+				pending.blockNumber = 0
+				pending.previousConfirmationCount = nil
+				bcm.receiptChecker.schedule(pending, true)
+			case reason == ffcapi.ErrorReasonNodeBehind:
+				// The node answering has not yet caught up far enough past the block to prove anything - retried on the
+				// next head block, and later events of the same listener are held until then to preserve ordering.
+				log.L(bcm.ctx).Infof("Confirmation listener receipt validation deferred item=%s duration=%s: %s", pending.getKey(), time.Since(receiptValidationStartTime), err)
+			default:
+				log.L(bcm.ctx).Errorf("Confirmation listener receipt validation failed item=%s duration=%s reason=%s: %s", pending.getKey(), time.Since(receiptValidationStartTime), reason, err)
+			}
 			return err
 		}
 		if res == nil || res.BlockHash == "" {
 			return i18n.NewError(bcm.ctx, tmmsgs.MsgTransactionReceiptMissingBlockHash)
 		}
 		if !strings.EqualFold(strings.ToLower(res.BlockHash), strings.ToLower(pending.blockHash)) {
+			if pending.pType == pendingTypeEvent {
+				// The block we saw this event in was re-orged out, and the transaction re-included in another block.
+				// The connector re-detects the event under that block hash (a new event, with a new key), so drop this
+				// one rather than mutating it - see the not found case above.
+				log.L(bcm.ctx).Warnf("Transaction receipt block hash mismatch on confirmation - dropping orphaned event item=%s receiptBlockHash=%s", pending.getKey(), res.BlockHash)
+				bcm.removeItem(pending, false)
+				return nil
+			}
 			// set the new block hash and number and requeue for confirmation check
 			pending.blockHash = res.BlockHash
 			pending.blockNumber = res.BlockNumber.Uint64()

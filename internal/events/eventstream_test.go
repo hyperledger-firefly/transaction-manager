@@ -84,6 +84,7 @@ func mockMetrics() *metricsmocks.EventMetricsEmitter {
 	emm.On("RecordReceiptCheckMetrics", mock.Anything, mock.Anything, mock.Anything).Maybe()
 	emm.On("RecordReceiptMetrics", mock.Anything, mock.Anything, mock.Anything).Maybe()
 	emm.On("RecordConfirmationMetrics", mock.Anything, mock.Anything).Maybe()
+	emm.On("RecordEventRedetectedMetric", mock.Anything).Maybe()
 	return emm
 }
 
@@ -2467,11 +2468,15 @@ func TestEventBehindHWMCheckpointIsDelivered(t *testing.T) {
 	assert.NotNil(t, ewc)
 	assert.Equal(t, uint64(4950), ewc.Event.ID.BlockNumber.Uint64())
 
-	// Behind the position of an event the receiver acked, we know we already delivered it
+	// Behind the position of an event the receiver acked, we know we already delivered it - dropped and counted
+	emm := &metricsmocks.EventMetricsEmitter{}
+	emm.On("RecordEventRedetectedMetric", mock.Anything).Once()
+	es.metrics = emm
 	li.checkpointSource = checkpointSourceEvent
 	l, ewc = es.checkConfirmedEventForBatch(e)
 	assert.Nil(t, l)
 	assert.Nil(t, ewc)
+	emm.AssertExpectations(t)
 }
 
 func TestHWMCheckpointPersistedDuringCatchup(t *testing.T) {

@@ -103,6 +103,26 @@ type ChainTrackingMode string
 
 const (
 	// ChainTrackingModeLight - in this mode, the connector fetches the head block number only, no block details are fetched. Therefore, block listener is not supported, confirmation result contains only the number of the confirmation.
+	//
+	// Light mode is designed for a JSON/RPC endpoint that only permits eth_blockNumber, eth_getLogs for specific filtered logs
+	// over a block range, and eth_getTransactionReceipt for individual transactions - typically a load balancer in front of
+	// several nodes that are not guaranteed to be at the same height. The contract between the connector and FFTM is:
+	//
+	//   - Requirement on the nodes: a node serving an eth_getLogs query MUST return an error if fromBlock or toBlock is outside
+	//     the block range it knows (geth, Nethermind and Besu from PR #9604 do). A successful response is then complete for the
+	//     whole range requested, whichever node answered.
+	//   - D is the connector's checkpoint block gap: both the re-org rescan window and the maximum accepted height drift between
+	//     nodes. H is the highest head the connector has observed, and only moves forward (a drop of more than D is accepted
+	//     as a chain reset, never treated as drift). Every node is expected to know every block up to H-D.
+	//   - The connector's checkpoint for a listener never exceeds min(toBlock+1, H-D) for the last range it scanned, and
+	//     events at or above the checkpoint may be delivered again after a re-scan, a listener change, or a restart.
+	//   - BlockHashEvent.HeadBlockNumber only moves forward, except for a chain reset.
+	//   - A null receipt is only reported as ErrorReasonNotFound once the node answering can be assumed to be at least D
+	//     blocks past the block the caller saw the transaction in (TransactionReceiptRequest.BlockNumber). Before that it is
+	//     reported as ErrorReasonNodeBehind, and the caller retries. Two nodes at the same height can be on different forks,
+	//     so a node merely having reached that block is not enough.
+	//   - Re-orgs deeper than D are accepted loss, as re-orgs deeper than the required confirmations are in full mode.
+	//     The required confirmations should not exceed D.
 	ChainTrackingModeLight ChainTrackingMode = "light"
 	// ChainTrackingModeFull - (default) in this mode, the connector fetches the head block number and downloads block details and maintain a consistent in-memory partial chain. Block listener is supported, and confirmation result contains extra block details as well as the number of the confirmation.
 	ChainTrackingModeFull ChainTrackingMode = "full"
@@ -145,7 +165,7 @@ type BlockHashEvent struct {
 	BlockHashes     []string        `json:"blockHash"`              // zero or more hashes (can be nil)
 	GapPotential    bool            `json:"gapPotential,omitempty"` // when true, the caller cannot be sure if blocks have been missed (use on reconnect of a websocket for example)
 	Created         *fftypes.FFTime `json:"created,omitempty"`      // timestamp when the blockhash event is created
-	HeadBlockNumber uint64          `json:"headBlockNumber"`        // the highest block seen by the connector
+	HeadBlockNumber uint64          `json:"headBlockNumber"`        // the highest block seen by the connector (ChainTrackingModeLight only - moves forward, except for a chain reset)
 }
 
 // EventID are the set of required fields an FFCAPI compatible connector needs to map to the underlying blockchain constructs, to uniquely identify an event
@@ -259,6 +279,10 @@ const (
 	ErrorReasonInsufficientFunds ErrorReason = "insufficient_funds"
 	// ErrorReasonNotFound if the requested object (block/receipt etc.) was not found
 	ErrorReasonNotFound ErrorReason = "not_found"
+	// ErrorReasonNodeBehind if the requested object (a receipt) was not found, but the node that answered cannot
+	// be assumed to have the block the caller expects it in (ChainTrackingModeLight, when TransactionReceiptRequest.BlockNumber
+	// is set). The caller should retry later - the object has not been shown to be missing from the chain.
+	ErrorReasonNodeBehind ErrorReason = "node_behind"
 	// ErrorKnownTransaction if the exact transaction is already known
 	ErrorKnownTransaction ErrorReason = "known_transaction"
 	// ErrorReasonDownstreamDown if the downstream JSONRPC endpoint is down

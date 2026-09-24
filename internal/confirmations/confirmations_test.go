@@ -1617,10 +1617,11 @@ func TestBlockConfirmationManagerHeadBlockNumberNewForkOnHeadDrop(t *testing.T) 
 	mca.AssertExpectations(t)
 }
 
-// TestBlockConfirmationManagerHeadBlockNumberReceiptNotFoundRetriesOnNextBlock checks an event whose
-// receipt is briefly not found on confirmation (for example a lagging node) keeps its block details,
-// so it stays under its key in bcm.pending, and is validated again and delivered on the next head block.
-func TestBlockConfirmationManagerHeadBlockNumberReceiptNotFoundRetriesOnNextBlock(t *testing.T) {
+// TestBlockConfirmationManagerHeadBlockNumberReceiptNodeBehindRetriesOnNextBlock checks an event whose
+// receipt is not found on confirmation, but where the connector reports the node answering might just be
+// lagging (ErrorReasonNodeBehind), keeps its block details, so it stays under its key in bcm.pending, and
+// is validated again and delivered on the next head block.
+func TestBlockConfirmationManagerHeadBlockNumberReceiptNodeBehindRetriesOnNextBlock(t *testing.T) {
 	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
 
 	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
@@ -1642,10 +1643,11 @@ func TestBlockConfirmationManagerHeadBlockNumberReceiptNotFoundRetriesOnNextBloc
 
 	receiptChecked := make(chan struct{}, 2)
 	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
-		return r.TransactionHash == txHash
+		// The block we saw the event in is passed, so the connector can tell whether a null receipt is definitive
+		return r.TransactionHash == txHash && r.BlockNumber != nil && r.BlockNumber.Uint64() == 1001
 	})).Run(func(mock.Arguments) {
 		receiptChecked <- struct{}{}
-	}).Return(nil, ffcapi.ErrorReasonNotFound, errors.New("not found")).Once()
+	}).Return(nil, ffcapi.ErrorReasonNodeBehind, errors.New("node behind")).Once()
 	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
 		return r.TransactionHash == txHash
 	})).Return(&ffcapi.TransactionReceiptResponse{
@@ -1872,23 +1874,148 @@ func TestBlockConfirmationManagerHeadBlockNumberReceiptBlockHashMismatch(t *test
 		t.Fatal("timeout waiting for TransactionReceipt")
 	}
 
-	pendingKey := (&Notification{NotificationType: NewEventLog, Event: eventToConfirm}).eventPendingItem().getKey()
-	bcm.pendingMux.Lock()
-	p := bcm.pending[pendingKey]
-	bcm.pendingMux.Unlock()
-	assert.NotNil(t, p)
-	assert.Equal(t, receiptHash, p.blockHash)
-	assert.Equal(t, uint64(1005), p.blockNumber)
-	assert.Nil(t, p.previousConfirmationCount)
-	assert.Equal(t, 0, bcm.receiptChecker.entries.Len())
-
+	// The event item is dropped, never mutated: the connector re-detects the event under the new block hash
 	select {
 	case n := <-confirmed:
 		t.Fatalf("unexpected confirmation notification: %+v", n)
 	case <-time.After(50 * time.Millisecond):
 	}
+	bcm.pendingMux.Lock()
+	assert.Empty(t, bcm.pending)
+	bcm.pendingMux.Unlock()
+	assert.Equal(t, 0, bcm.receiptChecker.entries.Len())
 
 	bcm.Stop()
+	mca.AssertExpectations(t)
+}
+
+// TestBlockConfirmationManagerHeadBlockNumberReceiptNotFoundDropsOrphanedEvent checks that once the
+// connector reports a definitive not found (the node answering is far enough past the block for a null
+// receipt to be conclusive) the event is dropped without a confirmation, and a later event of the same
+// listener held behind it is confirmed in the same pass.
+func TestBlockConfirmationManagerHeadBlockNumberReceiptNotFoundDropsOrphanedEvent(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+
+	var confirmed []uint64
+	listener := fftypes.NewUUID()
+	orphanedTxHash := fmt.Sprintf("0x%064x", 1000)
+	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
+		return r.TransactionHash == orphanedTxHash && r.BlockNumber != nil && r.BlockNumber.Uint64() == 1000
+	})).Return(nil, ffcapi.ErrorReasonNotFound, errors.New("not found")).Once()
+	orphaned := &Notification{
+		NotificationType: NewEventLog,
+		Event: &EventInfo{
+			ID: &ffcapi.EventID{
+				ListenerID:      listener,
+				TransactionHash: orphanedTxHash,
+				BlockHash:       fmt.Sprintf("0x%064x", 1000+0xff00),
+				BlockNumber:     1000,
+			},
+			Confirmations: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
+				t.Fatalf("unexpected confirmation notification for orphaned event: %+v", notification)
+			},
+		},
+	}
+	orphanedItem := orphaned.eventPendingItem()
+	bcm.addOrReplaceItem(orphanedItem)
+	bcm.addOrReplaceItem(lightModeOrderingTestEvent(mca, listener, 1001, 0, &confirmed).eventPendingItem())
+
+	bcm.headBlockNumber = 1005
+	bcm.checkAndDispatchConfirmationsUsingBlockHeight()
+	assert.Equal(t, []uint64{1001}, confirmed)
+	assert.Empty(t, bcm.pending)
+	// The orphaned item itself is never mutated
+	assert.Equal(t, uint64(1000), orphanedItem.blockNumber)
+	assert.Equal(t, orphaned.Event.ID.BlockHash, orphanedItem.blockHash)
+	mca.AssertExpectations(t)
+}
+
+// TestBlockConfirmationManagerHeadBlockNumberTransactionReceiptBlockHashMismatch checks a transaction
+// item (keyed by transaction hash) moves to the block the receipt now reports, and is confirmed from there.
+func TestBlockConfirmationManagerHeadBlockNumberTransactionReceiptBlockHashMismatch(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+	emm := &metricsmocks.EventMetricsEmitter{}
+	bcm.receiptChecker = newReceiptChecker(bcm, 0, emm)
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+	blockHash := "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542"
+	receiptHash := "0x3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
+	var confirmed *apitypes.ConfirmationsNotification
+	pending := &pendingItem{
+		pType:           pendingTypeTransaction,
+		transactionHash: txHash,
+		blockHash:       blockHash,
+		blockNumber:     1001,
+		confirmationsCallback: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
+			confirmed = notification
+		},
+	}
+	bcm.pending[pending.getKey()] = pending
+	mca.On("TransactionReceipt", mock.Anything, mock.Anything).Return(&ffcapi.TransactionReceiptResponse{
+		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
+			BlockNumber: fftypes.NewFFBigInt(1005),
+			BlockHash:   receiptHash,
+		},
+	}, ffcapi.ErrorReason(""), nil)
+
+	// Mismatch: moved to the new block, not yet confirmed
+	bcm.headBlockNumber = 1005
+	bcm.checkAndDispatchConfirmationsUsingBlockHeight()
+	assert.Nil(t, confirmed)
+	assert.Equal(t, receiptHash, pending.blockHash)
+	assert.Equal(t, uint64(1005), pending.blockNumber)
+	assert.Len(t, bcm.pending, 1)
+
+	// Confirmed from the new block
+	bcm.headBlockNumber = 1009
+	bcm.checkAndDispatchConfirmationsUsingBlockHeight()
+	assert.NotNil(t, confirmed)
+	assert.True(t, confirmed.Confirmed)
+	assert.Empty(t, bcm.pending)
+	mca.AssertExpectations(t)
+}
+
+// TestBlockConfirmationManagerHeadBlockNumberTransactionReceiptNotFoundReschedules checks a transaction
+// item (keyed by transaction hash, so safe to mutate) goes back to waiting for a receipt on a definitive
+// not found, while a node behind result leaves it untouched for the next head block.
+func TestBlockConfirmationManagerHeadBlockNumberTransactionReceiptNotFoundReschedules(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+	emm := &metricsmocks.EventMetricsEmitter{}
+	bcm.receiptChecker = newReceiptChecker(bcm, 0, emm)
+
+	txHash := "0x531e219d98d81dc9f9a14811ac537479f5d77a74bdba47629bfbebe2d7663ce7"
+	blockHash := "0x0e32d749a86cfaf551d528b5b121cea456f980a39e5b8136eb8e85dbc744a542"
+	pending := &pendingItem{
+		pType:           pendingTypeTransaction,
+		transactionHash: txHash,
+		blockHash:       blockHash,
+		blockNumber:     1001,
+		confirmationsCallback: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
+			t.Fatalf("unexpected confirmation notification: %+v", notification)
+		},
+	}
+	bcm.pending[pending.getKey()] = pending
+	isTx := mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
+		return r.TransactionHash == txHash && r.BlockNumber != nil && r.BlockNumber.Uint64() == 1001
+	})
+	mca.On("TransactionReceipt", mock.Anything, isTx).Return(nil, ffcapi.ErrorReasonNodeBehind, errors.New("node behind")).Once()
+	mca.On("TransactionReceipt", mock.Anything, isTx).Return(nil, ffcapi.ErrorReasonNotFound, errors.New("not found")).Once()
+
+	// Node behind: untouched, nothing scheduled
+	bcm.headBlockNumber = 1005
+	bcm.checkAndDispatchConfirmationsUsingBlockHeight()
+	assert.Equal(t, blockHash, pending.blockHash)
+	assert.Equal(t, uint64(1001), pending.blockNumber)
+	assert.Equal(t, 0, bcm.receiptChecker.entries.Len())
+
+	// Definitive not found: back to waiting for a receipt
+	bcm.headBlockNumber = 1006
+	bcm.checkAndDispatchConfirmationsUsingBlockHeight()
+	assert.Equal(t, "", pending.blockHash)
+	assert.Equal(t, uint64(0), pending.blockNumber)
+	assert.Nil(t, pending.previousConfirmationCount)
+	assert.Equal(t, 1, bcm.receiptChecker.entries.Len())
+	assert.Len(t, bcm.pending, 1)
 	mca.AssertExpectations(t)
 }
 
@@ -2206,7 +2333,7 @@ func lightModeOrderingTestEvent(mca *ffcapimocks.API, listenerID *fftypes.UUID, 
 	blockHash := fmt.Sprintf("0x%064x", blockNumber+0xff00)
 	isTx := mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool { return r.TransactionHash == txHash })
 	if notFoundCount > 0 {
-		mca.On("TransactionReceipt", mock.Anything, isTx).Return(nil, ffcapi.ErrorReasonNotFound, errors.New("not found")).Times(notFoundCount)
+		mca.On("TransactionReceipt", mock.Anything, isTx).Return(nil, ffcapi.ErrorReasonNodeBehind, errors.New("node behind")).Times(notFoundCount)
 	}
 	mca.On("TransactionReceipt", mock.Anything, isTx).Return(&ffcapi.TransactionReceiptResponse{
 		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
@@ -2237,7 +2364,7 @@ func lightModeOrderingTestEvent(mca *ffcapimocks.API, listenerID *fftypes.UUID, 
 // when an event fails receipt validation on confirmation, later events of the same listener are not
 // confirmed ahead of it. Otherwise the later event is delivered and acked first, and the earlier one is
 // then dropped by the event stream as a re-detection behind the checkpoint. Other listeners carry on.
-// The failing event is never dropped, however many head blocks it keeps failing for.
+// The failing event is never dropped while the connector reports the node answering might just be behind.
 func TestBlockConfirmationManagerHeadBlockNumberValidationFailureHoldsLaterEventsForListener(t *testing.T) {
 	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
 
@@ -2247,8 +2374,8 @@ func TestBlockConfirmationManagerHeadBlockNumberValidationFailureHoldsLaterEvent
 	bcm.addOrReplaceItem(lightModeOrderingTestEvent(mca, listener1, 1001, 0, &confirmed).eventPendingItem())
 	bcm.addOrReplaceItem(lightModeOrderingTestEvent(mca, listener2, 1002, 0, &confirmed).eventPendingItem())
 
-	// All reach 3 confirmations. Block 1000 is not found for 3 head blocks, so 1001 on the same listener
-	// must wait, and neither is dropped
+	// All reach 3 confirmations. Block 1000 is not found (node behind) for 3 head blocks, so 1001 on the
+	// same listener must wait, and neither is dropped
 	for head := uint64(1005); head <= 1007; head++ {
 		bcm.headBlockNumber = head
 		bcm.checkAndDispatchConfirmationsUsingBlockHeight()

@@ -26,6 +26,10 @@ type TransactionReceiptRequest struct {
 	EventFilters    []fftypes.JSONAny `json:"eventFilters"`
 	Methods         []fftypes.JSONAny `json:"methods"`
 	ExtractSigner   bool              `json:"extractSigner"`
+	// BlockNumber is the block the caller previously saw the transaction in, if any. In ChainTrackingModeLight a connector
+	// uses it to decide whether a null receipt is definitive (ErrorReasonNotFound), or may just be a node that has not
+	// caught up far enough past that block (ErrorReasonNodeBehind). See ChainTrackingModeLight.
+	BlockNumber *fftypes.FFBigInt `json:"blockNumber,omitempty"`
 }
 
 type TransactionReceiptResponseBase struct {

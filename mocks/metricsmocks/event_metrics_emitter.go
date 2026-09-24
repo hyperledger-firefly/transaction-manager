@@ -33,6 +33,11 @@ func (_m *EventMetricsEmitter) RecordConfirmationMetrics(ctx context.Context, du
 	_m.Called(ctx, durationInSeconds)
 }
 
+// RecordEventRedetectedMetric provides a mock function with given fields: ctx
+func (_m *EventMetricsEmitter) RecordEventRedetectedMetric(ctx context.Context) {
+	_m.Called(ctx)
+}
+
 // RecordNotificationProcessMetrics provides a mock function with given fields: ctx, notificationType, durationInSeconds
 func (_m *EventMetricsEmitter) RecordNotificationProcessMetrics(ctx context.Context, notificationType string, durationInSeconds float64) {
 	_m.Called(ctx, notificationType, durationInSeconds)

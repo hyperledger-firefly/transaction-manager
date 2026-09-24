@@ -127,6 +127,7 @@ type eventStream struct {
 	checkpointsDB         persistence.CheckpointPersistence
 	confirmations         confirmations.Manager
 	confirmationsRequired int
+	metrics               metrics.EventStreamMetricsEmitter
 	listeners             map[fftypes.UUID]*listener
 	wsChannels            ws.WebSocketChannels
 	retry                 *retry.Retry
@@ -199,6 +200,7 @@ func newEventStream(
 		checkpointInterval:    config.GetDuration(tmconfig.EventStreamsCheckpointInterval),
 		confirmations:         confirmations.NewBlockConfirmationManager(esCtx, connector, "_es_"+spec.ID.String(), eme),
 		confirmationsRequired: config.GetInt(tmconfig.ConfirmationsRequired),
+		metrics:               eme,
 		apiManagedStream:      apiManagedStream,
 	}
 	// The configuration we have in memory, applies all the defaults to what is passed in
@@ -918,7 +920,11 @@ func (es *eventStream) checkConfirmedEventForBatch(e *ffcapi.ListenerEvent) (l *
 			// We're perfectly happy to accept re-detections from the connector, as it can be
 			// very efficient to batch operations between listeners that cause re-detections.
 			// However, we protect the application from receiving the re-detections in this case.
+			// Routine after a listener change or restart (the connector rescans from the checkpoint it is given),
+			// and in ChainTrackingModeLight on every rescan of the unstable window behind the head - so logged at
+			// debug, and counted, rather than warned about.
 			log.L(es.bgCtx).Debugf("%s '%s' event re-detected behind checkpoint: %s", l.spec.ID, l.spec.SignatureString(), eToLog)
+			es.metrics.RecordEventRedetectedMetric(es.bgCtx)
 			return nil, nil
 		}
 	}
