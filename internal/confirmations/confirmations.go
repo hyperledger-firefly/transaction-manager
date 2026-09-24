@@ -169,6 +169,12 @@ type pendingItem struct {
 	listenerID                *fftypes.UUID // events only
 }
 
+func (pi *pendingItem) LessThan(other *pendingItem) bool {
+	return pi.blockNumber < other.blockNumber ||
+		(pi.blockNumber == other.blockNumber && (pi.transactionIndex < other.transactionIndex ||
+			(pi.transactionIndex == other.transactionIndex && pi.logIndex < other.logIndex)))
+}
+
 func pendingKeyForTX(txHash string) string {
 	return fmt.Sprintf("TX:th=%s", txHash)
 }
@@ -219,9 +225,7 @@ func (pi pendingItems) Less(i, j int) bool {
 	// - Block number
 	// - Transaction index within the block
 	// - Log index within the transaction (only for events)
-	return pi[i].blockNumber < pi[j].blockNumber ||
-		(pi[i].blockNumber == pi[j].blockNumber && (pi[i].transactionIndex < pi[j].transactionIndex ||
-			(pi[i].transactionIndex == pi[j].transactionIndex && pi[i].logIndex < pi[j].logIndex)))
+	return pi[i].LessThan(pi[j])
 }
 
 type blockState struct {
@@ -516,7 +520,11 @@ func (bcm *blockConfirmationManager) processNotifications(notifications []*Notif
 		case NewEventLog:
 			newItem := n.eventPendingItem()
 			bcm.addOrReplaceItem(newItem)
-			if err := bcm.walkChainForItem(newItem, blocks); err != nil {
+			if bcm.chainTrackingMode == ffcapi.ChainTrackingModeLight && bcm.hasEarlierPendingEvent(newItem) {
+				// An earlier event of this listener is still pending (it might have failed receipt validation),
+				// so leave this one to checkAndDispatchConfirmationsUsingBlockHeight, which dispatches in order
+				log.L(bcm.ctx).Debugf("Deferring confirmation check for %s until earlier pending events of the listener", newItem.getKey())
+			} else if err := bcm.walkChainForItem(newItem, blocks); err != nil {
 				// If we error, we should return the remaining notifications to be processed later
 				// so that the calling function can remove the ones that were processed successfully
 				// This still guarantees ordering of the notifications that were processed successfully
@@ -919,11 +927,33 @@ func (bcm *blockConfirmationManager) checkAndDispatchConfirmationsUsingBlockHeig
 	// as apparent re-detections once the checkpoint moves past them).
 	sort.Sort(items)
 	log.L(bcm.ctx).Debugf("Checking block height confirmations for %d pending items headBlock=%d", len(items), headBlock)
+	// For the same reason, once an event fails we must not dispatch any later event of the same listener
+	// on this pass. They are all retried in order on the next head block.
+	// Other listeners and transactions are not affected.
+	failedListeners := make(map[fftypes.UUID]bool)
 	for _, p := range items {
+		if p.listenerID != nil && failedListeners[*p.listenerID] {
+			continue
+		}
 		if err := bcm.dispatchConfirmationUsingHeadBlockNumber(p); err != nil {
 			log.L(bcm.ctx).Errorf("Block height confirmation refresh failed for %s: %s", p.getKey(), err)
+			if p.listenerID != nil {
+				failedListeners[*p.listenerID] = true
+			}
 		}
 	}
+}
+
+// hasEarlierPendingEvent returns true if an event of the same listener that is earlier on the chain is still pending
+func (bcm *blockConfirmationManager) hasEarlierPendingEvent(item *pendingItem) bool {
+	bcm.pendingMux.Lock()
+	defer bcm.pendingMux.Unlock()
+	for _, p := range bcm.pending {
+		if p.pType == pendingTypeEvent && p.listenerID.Equals(item.listenerID) && p.LessThan(item) {
+			return true
+		}
+	}
+	return false
 }
 
 func (bcm *blockConfirmationManager) dispatchConfirmationUsingHeadBlockNumber(pending *pendingItem) error {
@@ -961,15 +991,13 @@ func (bcm *blockConfirmationManager) dispatchBlockHeightConfirmations(pending *p
 			TransactionHash: pending.transactionHash,
 		})
 		if err != nil {
-			if reason == ffcapi.ErrorReasonNotFound {
-				// need to schedule the receipt check again as the receipt is no longer valid
-				pending.blockHash = ""
-				pending.blockNumber = 0
-				pending.previousConfirmationCount = nil
-				bcm.receiptChecker.schedule(pending, true)
-			} else {
-				log.L(bcm.ctx).Errorf("Confirmation listener receipt validation failed item=%s duration=%s: %s", pending.getKey(), time.Since(receiptValidationStartTime), err)
-			}
+			// All receipt check error are retried on the next head block.
+			// The item is never dropped however long this fails, as a flaky RPC endpoint cannot prove the event
+			// was orphaned. Later events of the same listener are held until it passes, so a persistent failure
+			// stalls the listener rather than losing an event.
+			// Because lack of linkage between blocks and flaky RPC endpoint, we cannot detect if the receipt is
+			// indeed orphaned or simply caused by a delayed peer.
+			log.L(bcm.ctx).Errorf("Confirmation listener receipt validation failed item=%s duration=%s reason=%s: %s", pending.getKey(), time.Since(receiptValidationStartTime), reason, err)
 			return err
 		}
 		if res == nil || res.BlockHash == "" {
