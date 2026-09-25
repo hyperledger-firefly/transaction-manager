@@ -30,6 +30,10 @@ type TransactionReceiptRequest struct {
 	// uses it to decide whether a null receipt is definitive (ErrorReasonNotFound), or may just be a node that has not
 	// caught up far enough past that block (ErrorReasonNodeBehind). See ChainTrackingModeLight.
 	BlockNumber *fftypes.FFBigInt `json:"blockNumber,omitempty"`
+	// BlockHash is the hash of that block, if known. In ChainTrackingModeLight a connector uses it to hold back a receipt
+	// in a different block (ErrorReasonNodeBehind) until it is definitive, as the node answering may be on another fork.
+	// See ChainTrackingModeLight.
+	BlockHash string `json:"blockHash,omitempty"`
 }
 
 type TransactionReceiptResponseBase struct {

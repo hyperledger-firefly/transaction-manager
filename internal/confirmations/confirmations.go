@@ -992,11 +992,18 @@ func (bcm *blockConfirmationManager) dispatchBlockHeightConfirmations(pending *p
 		receiptValidationStartTime := time.Now()
 		// do confirmation check here to ensure the transaction receipt is still valid
 		log.L(bcm.ctx).Debugf("Validating transaction receipt on confirmation listener item=%s", pending.getKey())
-		res, reason, err := bcm.connector.TransactionReceipt(bcm.ctx, &ffcapi.TransactionReceiptRequest{
+		receiptReq := &ffcapi.TransactionReceiptRequest{
 			TransactionHash: pending.transactionHash,
 			//nolint:gosec // block numbers do not reach the int64 range
 			BlockNumber: fftypes.NewFFBigInt(int64(pending.blockNumber)),
-		})
+		}
+		if pending.pType == pendingTypeEvent {
+			// Send the block hash for events, so the connector holds back a receipt in another block until it is
+			// definitive (a mismatch drops the event). A transaction item is updated in place on a mismatch and
+			// checked again, so it does not need it.
+			receiptReq.BlockHash = pending.blockHash
+		}
+		res, reason, err := bcm.connector.TransactionReceipt(bcm.ctx, receiptReq)
 		if err != nil {
 			switch {
 			case reason == ffcapi.ErrorReasonNotFound && pending.pType == pendingTypeEvent:
@@ -1027,11 +1034,11 @@ func (bcm *blockConfirmationManager) dispatchBlockHeightConfirmations(pending *p
 		if res == nil || res.BlockHash == "" {
 			return i18n.NewError(bcm.ctx, tmmsgs.MsgTransactionReceiptMissingBlockHash)
 		}
-		if !strings.EqualFold(strings.ToLower(res.BlockHash), strings.ToLower(pending.blockHash)) {
+		if !strings.EqualFold(res.BlockHash, pending.blockHash) {
 			if pending.pType == pendingTypeEvent {
-				// The block we saw this event in was re-orged out, and the transaction re-included in another block.
-				// The connector re-detects the event under that block hash (a new event, with a new key), so drop this
-				// one rather than mutating it - see the not found case above.
+				// The event's block was re-orged out and the transaction included in another block. The connector only
+				// returns this once it is definitive (we sent the block hash), and re-detects the event under the new
+				// block hash as a new item. So drop this one rather than mutating it, as in the not found case above.
 				log.L(bcm.ctx).Warnf("Transaction receipt block hash mismatch on confirmation - dropping orphaned event item=%s receiptBlockHash=%s", pending.getKey(), res.BlockHash)
 				bcm.removeItem(pending, false)
 				return nil

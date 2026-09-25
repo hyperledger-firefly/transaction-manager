@@ -121,6 +121,8 @@ const (
 	//     blocks past the block the caller saw the transaction in (TransactionReceiptRequest.BlockNumber). Before that it is
 	//     reported as ErrorReasonNodeBehind, and the caller retries. Two nodes at the same height can be on different forks,
 	//     so a node merely having reached that block is not enough.
+	//   - A receipt in a different block from the one the caller saw (TransactionReceiptRequest.BlockHash) is treated the
+	//     same way: it is reported as ErrorReasonNodeBehind until that bar is met, and only then returned as-is.
 	//   - Re-orgs deeper than D are accepted loss, as re-orgs deeper than the required confirmations are in full mode.
 	//     The required confirmations should not exceed D.
 	ChainTrackingModeLight ChainTrackingMode = "light"

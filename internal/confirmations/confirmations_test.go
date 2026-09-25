@@ -1848,7 +1848,8 @@ func TestBlockConfirmationManagerHeadBlockNumberReceiptBlockHashMismatch(t *test
 
 	receiptChecked := make(chan struct{}, 1)
 	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
-		return r.TransactionHash == txHash
+		// The block hash is sent so the connector only returns a receipt in another block once definitive
+		return r.TransactionHash == txHash && r.BlockHash == blockHash
 	})).Run(func(mock.Arguments) {
 		receiptChecked <- struct{}{}
 	}).Return(&ffcapi.TransactionReceiptResponse{
@@ -1951,7 +1952,10 @@ func TestBlockConfirmationManagerHeadBlockNumberTransactionReceiptBlockHashMisma
 		},
 	}
 	bcm.pending[pending.getKey()] = pending
-	mca.On("TransactionReceipt", mock.Anything, mock.Anything).Return(&ffcapi.TransactionReceiptResponse{
+	mca.On("TransactionReceipt", mock.Anything, mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool {
+		// No block hash for transaction items: a mismatch is safe to apply straight away
+		return r.BlockHash == ""
+	})).Return(&ffcapi.TransactionReceiptResponse{
 		TransactionReceiptResponseBase: ffcapi.TransactionReceiptResponseBase{
 			BlockNumber: fftypes.NewFFBigInt(1005),
 			BlockHash:   receiptHash,
