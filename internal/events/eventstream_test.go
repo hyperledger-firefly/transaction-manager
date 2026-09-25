@@ -84,6 +84,7 @@ func mockMetrics() *metricsmocks.EventMetricsEmitter {
 	emm.On("RecordReceiptCheckMetrics", mock.Anything, mock.Anything, mock.Anything).Maybe()
 	emm.On("RecordReceiptMetrics", mock.Anything, mock.Anything, mock.Anything).Maybe()
 	emm.On("RecordConfirmationMetrics", mock.Anything, mock.Anything).Maybe()
+	emm.On("RecordEventRedetectedMetric", mock.Anything).Maybe()
 	return emm
 }
 
@@ -1862,6 +1863,47 @@ func TestStartFailCreateClient(t *testing.T) {
 	assert.Regexp(t, "FF00153", err)
 }
 
+func TestEventLoopProcessNewEventPassesDetectedStable(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{
+		updates:       make(chan *ffcapi.ListenerEvent, 1),
+		eventLoopDone: make(chan struct{}),
+	}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+
+	u1 := &ffcapi.ListenerEvent{
+		Checkpoint: &utCheckpointType{SomeSequenceNumber: 12345},
+		Event: &ffcapi.Event{
+			ID: ffcapi.EventID{
+				ListenerID: fftypes.NewUUID(),
+			},
+		},
+		DetectedStable: true,
+	}
+	mcm := &confirmationsmocks.Manager{}
+	mcm.On("Notify", mock.MatchedBy(func(n *confirmations.Notification) bool {
+		return n.NotificationType == confirmations.NewEventLog && n.Event.DetectedStable
+	})).Return(nil).Run(func(args mock.Arguments) {
+		ss.cancelCtx()
+	})
+	es.confirmations = mcm
+	es.confirmationsRequired = 1
+	es.listeners[*u1.Event.ID.ListenerID] = &listener{
+		spec: &apitypes.Listener{ID: u1.Event.ID.ListenerID},
+	}
+
+	go func() {
+		ss.updates <- u1
+	}()
+
+	es.eventLoop(ss)
+	mcm.AssertExpectations(t)
+}
+
 func TestEventLoopProcessRemovedEvent(t *testing.T) {
 
 	es := newTestEventStream(t, `{
@@ -2467,11 +2509,15 @@ func TestEventBehindHWMCheckpointIsDelivered(t *testing.T) {
 	assert.NotNil(t, ewc)
 	assert.Equal(t, uint64(4950), ewc.Event.ID.BlockNumber.Uint64())
 
-	// Behind the position of an event the receiver acked, we know we already delivered it
+	// Behind the position of an event the receiver acked, we know we already delivered it - dropped and counted
+	emm := &metricsmocks.EventMetricsEmitter{}
+	emm.On("RecordEventRedetectedMetric", mock.Anything).Once()
+	es.metrics = emm
 	li.checkpointSource = checkpointSourceEvent
 	l, ewc = es.checkConfirmedEventForBatch(e)
 	assert.Nil(t, l)
 	assert.Nil(t, ewc)
+	emm.AssertExpectations(t)
 }
 
 func TestHWMCheckpointPersistedDuringCatchup(t *testing.T) {

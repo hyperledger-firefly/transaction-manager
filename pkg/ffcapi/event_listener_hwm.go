@@ -54,6 +54,12 @@ type EventListenerHWMRequest struct {
 //
 // A connector that never implements LastDetected (always nil) is functional, but accepts
 // a risk of a checkpoint being persisted past events FFTM has not yet acknowledged.
+//
+// In ChainTrackingModeLight the Checkpoint never exceeds min(toBlock+1, H-D) for the last
+// range scanned, where H is the highest head observed and D the connector's checkpoint block
+// gap - and events at or above the Checkpoint can be delivered again after a re-scan of that
+// window, a listener change, or a restart. FFTM de-duplicates those against the position of
+// the last event the receiver acked.
 type EventListenerHWMResponse struct {
 	Checkpoint   EventListenerCheckpoint `json:"checkpoint"`             // how far the connector has scanned
 	Catchup      bool                    `json:"catchup,omitempty"`      // informational only - informs an operator that the stream is catching up

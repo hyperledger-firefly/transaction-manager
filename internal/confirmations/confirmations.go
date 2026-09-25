@@ -72,8 +72,9 @@ type Notification struct {
 }
 
 type EventInfo struct {
-	ID            *ffcapi.EventID
-	Confirmations func(ctx context.Context, notification *apitypes.ConfirmationsNotification)
+	ID             *ffcapi.EventID
+	DetectedStable bool // the connector's ffcapi.ListenerEvent.DetectedStable - confirmed by count without receipt validation
+	Confirmations  func(ctx context.Context, notification *apitypes.ConfirmationsNotification)
 }
 
 type TransactionInfo struct {
@@ -167,6 +168,13 @@ type pendingItem struct {
 	transactionIndex          uint64        // known at creation time for event logs
 	logIndex                  uint64        // events only
 	listenerID                *fftypes.UUID // events only
+	detectedStable            bool          // events only - see EventInfo
+}
+
+func (pi *pendingItem) LessThan(other *pendingItem) bool {
+	return pi.blockNumber < other.blockNumber ||
+		(pi.blockNumber == other.blockNumber && (pi.transactionIndex < other.transactionIndex ||
+			(pi.transactionIndex == other.transactionIndex && pi.logIndex < other.logIndex)))
 }
 
 func pendingKeyForTX(txHash string) string {
@@ -196,6 +204,7 @@ func (n *Notification) eventPendingItem() *pendingItem {
 		transactionHash:       n.Event.ID.TransactionHash,
 		transactionIndex:      n.Event.ID.TransactionIndex.Uint64(),
 		logIndex:              n.Event.ID.LogIndex.Uint64(),
+		detectedStable:        n.Event.DetectedStable,
 		confirmationsCallback: n.Event.Confirmations,
 	}
 }
@@ -219,9 +228,7 @@ func (pi pendingItems) Less(i, j int) bool {
 	// - Block number
 	// - Transaction index within the block
 	// - Log index within the transaction (only for events)
-	return pi[i].blockNumber < pi[j].blockNumber ||
-		(pi[i].blockNumber == pi[j].blockNumber && (pi[i].transactionIndex < pi[j].transactionIndex ||
-			(pi[i].transactionIndex == pi[j].transactionIndex && pi[i].logIndex < pi[j].logIndex)))
+	return pi[i].LessThan(pi[j])
 }
 
 type blockState struct {
@@ -395,7 +402,7 @@ func (bcm *blockConfirmationManager) confirmationsListener() {
 					blockQueueDepth, blockQueueCap, bhe.HeadBlockNumber, bhe.GapPotential)
 			}
 			blockHashes = append(blockHashes, bhe.BlockHashes...)
-			bcm.headBlockNumber = bhe.HeadBlockNumber // always update the head block number, NOTE: the number can decrease during a re-org
+			bcm.headBlockNumber = bhe.HeadBlockNumber // always update the head block number. The connector only moves it backwards for a chain reset (see ffcapi.ChainTrackingModeLight)
 			// Need to also pass this event to any confirmed block listeners
 			// (they promise to always be efficient in handling these, having a go-routine
 			// dedicated to spinning fast just processing those separate to dispatching them)
@@ -516,10 +523,19 @@ func (bcm *blockConfirmationManager) processNotifications(notifications []*Notif
 		case NewEventLog:
 			newItem := n.eventPendingItem()
 			bcm.addOrReplaceItem(newItem)
-			if err := bcm.walkChainForItem(newItem, blocks); err != nil {
-				// If we error, we should return the remaining notifications to be processed later
-				// so that the calling function can remove the ones that were processed successfully
-				// This still guarantees ordering of the notifications that were processed successfully
+			if bcm.chainTrackingMode == ffcapi.ChainTrackingModeLight && bcm.hasEarlierPendingEvent(newItem) {
+				// An earlier event of this listener is still pending (it might have failed receipt validation),
+				// so leave this one to checkAndDispatchConfirmationsUsingBlockHeight, which dispatches in order
+				log.L(bcm.ctx).Debugf("Deferring confirmation check for %s until earlier pending events of the listener", newItem.getKey())
+			} else if err := bcm.walkChainForItem(newItem, blocks); err != nil {
+				// Only one of the pending item or a kept notification may retry this, or the event is dispatched twice.
+				// Light mode keeps the item: the head block sweep recomputes it from scratch, in order.
+				// Full mode keeps the notification: processBlock only extends confirmations from the last block
+				// found, so only a fresh walk can fill the gap a failed walk leaves.
+				if bcm.chainTrackingMode == ffcapi.ChainTrackingModeLight {
+					log.L(bcm.ctx).Debugf("Leaving %s to be retried on the next head block: %s", newItem.getKey(), err)
+					break
+				}
 				return notifications[i:], err
 			}
 		case NewTransaction:
@@ -548,6 +564,17 @@ func (bcm *blockConfirmationManager) processNotifications(notifications []*Notif
 // NOTE: there is no locking in this function
 // relies on the consumer logic to not call this function concurrently
 func (bcm *blockConfirmationManager) dispatchReceipt(pending *pendingItem, receipt *ffcapi.TransactionReceiptResponse, receiptGeneration uint64, blocks *blockState) {
+	// The item might have been confirmed, removed or replaced while this receipt was in flight.
+	// In light mode where checks are regularly scheduled due to lack of visibility of block information
+	// a second check can be scheduled before the first receipt is processed easily, so applying a receipt
+	// to an item we no longer track would dispatch it again.
+	bcm.pendingMux.Lock()
+	tracked := bcm.pending[pending.getKey()] == pending
+	bcm.pendingMux.Unlock()
+	if !tracked {
+		log.L(bcm.ctx).Debugf("Ignoring receipt for transaction %s that is no longer pending", pending.transactionHash)
+		return
+	}
 	if receiptGeneration > 0 && receiptGeneration <= pending.appliedReceiptGeneration {
 		log.L(bcm.ctx).Debugf("Ignoring stale receipt for transaction %s (actual_generation=%d applied_generation=%d)",
 			pending.transactionHash, receiptGeneration, pending.appliedReceiptGeneration)
@@ -908,11 +935,33 @@ func (bcm *blockConfirmationManager) checkAndDispatchConfirmationsUsingBlockHeig
 	// as apparent re-detections once the checkpoint moves past them).
 	sort.Sort(items)
 	log.L(bcm.ctx).Debugf("Checking block height confirmations for %d pending items headBlock=%d", len(items), headBlock)
+	// For the same reason, once an event fails we must not dispatch any later event of the same listener
+	// on this pass. They are all retried in order on the next head block.
+	// Other listeners and transactions are not affected.
+	failedListeners := make(map[fftypes.UUID]bool)
 	for _, p := range items {
+		if p.listenerID != nil && failedListeners[*p.listenerID] {
+			continue
+		}
 		if err := bcm.dispatchConfirmationUsingHeadBlockNumber(p); err != nil {
 			log.L(bcm.ctx).Errorf("Block height confirmation refresh failed for %s: %s", p.getKey(), err)
+			if p.listenerID != nil {
+				failedListeners[*p.listenerID] = true
+			}
 		}
 	}
+}
+
+// hasEarlierPendingEvent returns true if an event of the same listener that is earlier on the chain is still pending
+func (bcm *blockConfirmationManager) hasEarlierPendingEvent(item *pendingItem) bool {
+	bcm.pendingMux.Lock()
+	defer bcm.pendingMux.Unlock()
+	for _, p := range bcm.pending {
+		if p.pType == pendingTypeEvent && p.listenerID.Equals(item.listenerID) && p.LessThan(item) {
+			return true
+		}
+	}
+	return false
 }
 
 func (bcm *blockConfirmationManager) dispatchConfirmationUsingHeadBlockNumber(pending *pendingItem) error {
@@ -942,29 +991,64 @@ func (bcm *blockConfirmationManager) dispatchBlockHeightConfirmations(pending *p
 	}
 
 	confirmed := confirmationCount == bcm.requiredConfirmations
-	if confirmed {
+	// The receipt check catches a re-org between detection and confirmation. An event whose block was already
+	// stable when the connector delivered it cannot be re-orged (see ffcapi.ChainTrackingModeLight), so there is
+	// nothing to check
+	if confirmed && !pending.detectedStable {
 		receiptValidationStartTime := time.Now()
 		// do confirmation check here to ensure the transaction receipt is still valid
 		log.L(bcm.ctx).Debugf("Validating transaction receipt on confirmation listener item=%s", pending.getKey())
-		res, reason, err := bcm.connector.TransactionReceipt(bcm.ctx, &ffcapi.TransactionReceiptRequest{
+		receiptReq := &ffcapi.TransactionReceiptRequest{
 			TransactionHash: pending.transactionHash,
-		})
+			//nolint:gosec // block numbers do not reach the int64 range
+			BlockNumber: fftypes.NewFFBigInt(int64(pending.blockNumber)),
+		}
+		if pending.pType == pendingTypeEvent {
+			// Send the block hash for events, so the connector holds back a receipt in another block until it is
+			// definitive (a mismatch drops the event). A transaction item is updated in place on a mismatch and
+			// checked again, so it does not need it.
+			receiptReq.BlockHash = pending.blockHash
+		}
+		res, reason, err := bcm.connector.TransactionReceipt(bcm.ctx, receiptReq)
 		if err != nil {
-			if reason == ffcapi.ErrorReasonNotFound {
-				// need to schedule the receipt check again as the receipt is no longer valid
+			switch {
+			case reason == ffcapi.ErrorReasonNotFound && pending.pType == pendingTypeEvent:
+				// Definitive: the connector has established that the node answering is far enough past the block we
+				// saw this event in, for a null receipt to mean the transaction is not in its chain (see
+				// ffcapi.ChainTrackingModeLight). The event was orphaned by a re-org, so we drop it. If the transaction
+				// is included again the connector re-detects it under its new block hash, and it arrives as a new event.
+				// An event item is never mutated (its key includes the block) so removal is the only way to clear it,
+				// and returning nil lets later events of the listener, held behind this one, be checked in this pass.
+				log.L(bcm.ctx).Warnf("Transaction receipt not found on confirmation - dropping orphaned event item=%s duration=%s: %s", pending.getKey(), time.Since(receiptValidationStartTime), err)
+				bcm.removeItem(pending, false)
+				return nil
+			case reason == ffcapi.ErrorReasonNotFound:
+				// A transaction item is keyed by transaction hash, so we can go back to waiting for a receipt
 				pending.blockHash = ""
 				pending.blockNumber = 0
 				pending.previousConfirmationCount = nil
 				bcm.receiptChecker.schedule(pending, true)
-			} else {
-				log.L(bcm.ctx).Errorf("Confirmation listener receipt validation failed item=%s duration=%s: %s", pending.getKey(), time.Since(receiptValidationStartTime), err)
+			case reason == ffcapi.ErrorReasonNodeBehind:
+				// The node answering has not yet caught up far enough past the block to prove anything - retried on the
+				// next head block, and later events of the same listener are held until then to preserve ordering.
+				log.L(bcm.ctx).Infof("Confirmation listener receipt validation deferred item=%s duration=%s: %s", pending.getKey(), time.Since(receiptValidationStartTime), err)
+			default:
+				log.L(bcm.ctx).Errorf("Confirmation listener receipt validation failed item=%s duration=%s reason=%s: %s", pending.getKey(), time.Since(receiptValidationStartTime), reason, err)
 			}
 			return err
 		}
 		if res == nil || res.BlockHash == "" {
 			return i18n.NewError(bcm.ctx, tmmsgs.MsgTransactionReceiptMissingBlockHash)
 		}
-		if !strings.EqualFold(strings.ToLower(res.BlockHash), strings.ToLower(pending.blockHash)) {
+		if !strings.EqualFold(res.BlockHash, pending.blockHash) {
+			if pending.pType == pendingTypeEvent {
+				// The event's block was re-orged out and the transaction included in another block. The connector only
+				// returns this once it is definitive (we sent the block hash), and re-detects the event under the new
+				// block hash as a new item. So drop this one rather than mutating it, as in the not found case above.
+				log.L(bcm.ctx).Warnf("Transaction receipt block hash mismatch on confirmation - dropping orphaned event item=%s receiptBlockHash=%s", pending.getKey(), res.BlockHash)
+				bcm.removeItem(pending, false)
+				return nil
+			}
 			// set the new block hash and number and requeue for confirmation check
 			pending.blockHash = res.BlockHash
 			pending.blockNumber = res.BlockNumber.Uint64()

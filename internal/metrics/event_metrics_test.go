@@ -35,4 +35,5 @@ func TestTransactionHandlerEventMetricsEmitters(t *testing.T) {
 	mm.RecordNotificationQueueingMetrics(ctx, "test", 1)
 	mm.RecordReceiptCheckMetrics(ctx, "test", 1)
 	mm.RecordReceiptMetrics(ctx, 1)
+	mm.RecordEventRedetectedMetric(ctx)
 }
