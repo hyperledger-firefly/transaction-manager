@@ -1863,6 +1863,47 @@ func TestStartFailCreateClient(t *testing.T) {
 	assert.Regexp(t, "FF00153", err)
 }
 
+func TestEventLoopProcessNewEventPassesDetectedStable(t *testing.T) {
+
+	es := newTestEventStream(t, `{
+		"name": "ut_stream"
+	}`)
+
+	ss := &startedStreamState{
+		updates:       make(chan *ffcapi.ListenerEvent, 1),
+		eventLoopDone: make(chan struct{}),
+	}
+	ss.ctx, ss.cancelCtx = context.WithCancel(context.Background())
+
+	u1 := &ffcapi.ListenerEvent{
+		Checkpoint: &utCheckpointType{SomeSequenceNumber: 12345},
+		Event: &ffcapi.Event{
+			ID: ffcapi.EventID{
+				ListenerID: fftypes.NewUUID(),
+			},
+		},
+		DetectedStable: true,
+	}
+	mcm := &confirmationsmocks.Manager{}
+	mcm.On("Notify", mock.MatchedBy(func(n *confirmations.Notification) bool {
+		return n.NotificationType == confirmations.NewEventLog && n.Event.DetectedStable
+	})).Return(nil).Run(func(args mock.Arguments) {
+		ss.cancelCtx()
+	})
+	es.confirmations = mcm
+	es.confirmationsRequired = 1
+	es.listeners[*u1.Event.ID.ListenerID] = &listener{
+		spec: &apitypes.Listener{ID: u1.Event.ID.ListenerID},
+	}
+
+	go func() {
+		ss.updates <- u1
+	}()
+
+	es.eventLoop(ss)
+	mcm.AssertExpectations(t)
+}
+
 func TestEventLoopProcessRemovedEvent(t *testing.T) {
 
 	es := newTestEventStream(t, `{
