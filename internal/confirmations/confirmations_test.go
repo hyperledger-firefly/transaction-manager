@@ -1931,6 +1931,30 @@ func TestBlockConfirmationManagerHeadBlockNumberReceiptNotFoundDropsOrphanedEven
 	mca.AssertExpectations(t)
 }
 
+// TestBlockConfirmationManagerHeadBlockNumberDetectedStableSkipsValidation checks an event whose block was already
+// stable when the connector delivered it is confirmed by count without a receipt check (it cannot be re-orged, and a
+// snap synced node may not index a transaction that old), while an event that could still be re-orged is validated.
+func TestBlockConfirmationManagerHeadBlockNumberDetectedStableSkipsValidation(t *testing.T) {
+	bcm, mca := newTestBlockConfirmationManagerHeadBlockNumber()
+	forTx := func(blockNumber uint64) interface{} {
+		txHash := fmt.Sprintf("0x%064x", blockNumber)
+		return mock.MatchedBy(func(r *ffcapi.TransactionReceiptRequest) bool { return r.TransactionHash == txHash })
+	}
+
+	var confirmed []uint64
+	listener := fftypes.NewUUID()
+	stableEvent := lightModeOrderingTestEvent(mca, listener, 1000, 0, &confirmed)
+	stableEvent.Event.DetectedStable = true
+	unstableEvent := lightModeOrderingTestEvent(mca, listener, 1001, 0, &confirmed)
+
+	bcm.headBlockNumber = 1010
+	_, err := bcm.processNotifications([]*Notification{stableEvent, unstableEvent}, bcm.newBlockState())
+	assert.NoError(t, err)
+	assert.Equal(t, []uint64{1000, 1001}, confirmed)
+	mca.AssertNotCalled(t, "TransactionReceipt", mock.Anything, forTx(1000))
+	mca.AssertCalled(t, "TransactionReceipt", mock.Anything, forTx(1001))
+}
+
 // TestBlockConfirmationManagerHeadBlockNumberTransactionReceiptBlockHashMismatch checks a transaction
 // item (keyed by transaction hash) moves to the block the receipt now reports, and is confirmed from there.
 func TestBlockConfirmationManagerHeadBlockNumberTransactionReceiptBlockHashMismatch(t *testing.T) {

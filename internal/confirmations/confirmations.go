@@ -72,8 +72,9 @@ type Notification struct {
 }
 
 type EventInfo struct {
-	ID            *ffcapi.EventID
-	Confirmations func(ctx context.Context, notification *apitypes.ConfirmationsNotification)
+	ID             *ffcapi.EventID
+	DetectedStable bool // the connector's ffcapi.ListenerEvent.DetectedStable - confirmed by count without receipt validation
+	Confirmations  func(ctx context.Context, notification *apitypes.ConfirmationsNotification)
 }
 
 type TransactionInfo struct {
@@ -167,6 +168,7 @@ type pendingItem struct {
 	transactionIndex          uint64        // known at creation time for event logs
 	logIndex                  uint64        // events only
 	listenerID                *fftypes.UUID // events only
+	detectedStable            bool          // events only - see EventInfo
 }
 
 func (pi *pendingItem) LessThan(other *pendingItem) bool {
@@ -202,6 +204,7 @@ func (n *Notification) eventPendingItem() *pendingItem {
 		transactionHash:       n.Event.ID.TransactionHash,
 		transactionIndex:      n.Event.ID.TransactionIndex.Uint64(),
 		logIndex:              n.Event.ID.LogIndex.Uint64(),
+		detectedStable:        n.Event.DetectedStable,
 		confirmationsCallback: n.Event.Confirmations,
 	}
 }
@@ -988,7 +991,10 @@ func (bcm *blockConfirmationManager) dispatchBlockHeightConfirmations(pending *p
 	}
 
 	confirmed := confirmationCount == bcm.requiredConfirmations
-	if confirmed {
+	// The receipt check catches a re-org between detection and confirmation. An event whose block was already
+	// stable when the connector delivered it cannot be re-orged (see ffcapi.ChainTrackingModeLight), so there is
+	// nothing to check
+	if confirmed && !pending.detectedStable {
 		receiptValidationStartTime := time.Now()
 		// do confirmation check here to ensure the transaction receipt is still valid
 		log.L(bcm.ctx).Debugf("Validating transaction receipt on confirmation listener item=%s", pending.getKey())

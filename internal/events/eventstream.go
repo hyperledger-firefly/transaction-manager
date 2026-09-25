@@ -825,7 +825,8 @@ func (es *eventStream) processNewEvent(ctx context.Context, fev *ffcapi.Listener
 			err := es.confirmations.Notify(&confirmations.Notification{
 				NotificationType: confirmations.NewEventLog,
 				Event: &confirmations.EventInfo{
-					ID: &event.ID,
+					ID:             &event.ID,
+					DetectedStable: fev.DetectedStable,
 					Confirmations: func(ctx context.Context, notification *apitypes.ConfirmationsNotification) {
 						if notification.Confirmed {
 							// Push it to the batch when confirmed

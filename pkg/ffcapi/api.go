@@ -123,6 +123,9 @@ const (
 	//     so a node merely having reached that block is not enough.
 	//   - A receipt in a different block from the one the caller saw (TransactionReceiptRequest.BlockHash) is treated the
 	//     same way: it is reported as ErrorReasonNodeBehind until that bar is met, and only then returned as-is.
+	//   - An event whose block was already more than D behind the head when the connector delivered it is marked
+	//     ListenerEvent.DetectedStable. A re-org cannot remove that block, so the caller confirms it by head count without
+	//     validating its receipt. Nodes that snap synced may not index transactions that old, so its receipt can be null.
 	//   - Re-orgs deeper than D are accepted loss, as re-orgs deeper than the required confirmations are in full mode.
 	//     The required confirmations should not exceed D.
 	ChainTrackingModeLight ChainTrackingMode = "light"
@@ -260,6 +263,10 @@ type ListenerEvent struct {
 	Event      *Event                  `json:"event"`             // the event - for removed events, can only have the EventID fields set (to generate the protocol ID)
 	BlockEvent *BlockEvent             `json:"blockEvent"`        // the event for block listeners
 	Removed    bool                    `json:"removed,omitempty"` // when true, this is an explicit cancellation of a previous event
+	// DetectedStable is set by a ChainTrackingModeLight connector when the event's block was already behind its stable
+	// head (more than D behind the highest head observed) when it delivered the event, so it cannot be re-orged. The
+	// caller confirms such an event by head count, without validating its receipt. See ChainTrackingModeLight.
+	DetectedStable bool `json:"detectedStable,omitempty"`
 }
 
 // ErrorReason are a set of standard error conditions that a blockchain connector can return
