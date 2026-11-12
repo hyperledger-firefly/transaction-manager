@@ -37,6 +37,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -107,6 +108,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -205,6 +207,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -246,6 +249,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -385,6 +389,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`<nil>`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`<nil>`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -500,6 +505,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`<nil>`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`<nil>`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
@@ -521,7 +527,7 @@
 |connectionTimeout|The maximum amount of time that a connection is allowed to remain with no data transmitted|[`time.Duration`](https://pkg.go.dev/time#Duration)|`30s`
 |expectContinueTimeout|See [ExpectContinueTimeout in the Go docs](https://pkg.go.dev/net/http#Transport)|[`time.Duration`](https://pkg.go.dev/time#Duration)|`1s`
 |headers|Adds custom headers to HTTP requests|`map[string]string`|`<nil>`
-|idleTimeout|The max duration to hold a HTTP keepalive connection between calls|[`time.Duration`](https://pkg.go.dev/time#Duration)|`475ms`
+|idleTimeout|The max duration to hold a HTTP keepalive connection between calls|[`time.Duration`](https://pkg.go.dev/time#Duration)|`4750ms`
 |maxConnsPerHost|The max number of connections, per unique hostname. Zero means no limit|`int`|`0`
 |maxIdleConns|The max number of idle connections to hold pooled|`int`|`100`
 |maxIdleConnsPerHost|The max number of idle connections, per unique hostname. Zero means net/http uses the default of only 2.|`int`|`100`
@@ -582,6 +588,7 @@
 |certFile|The path to the certificate file for TLS on this API|`string`|`<nil>`
 |clientAuth|Enables or disables client auth for TLS on this API|`string`|`<nil>`
 |enabled|Enables or disables TLS on this API|`boolean`|`false`
+|includeSystemCAs|When true and a custom CA (caFile/ca) is configured, merge that CA into the system certificate pool instead of replacing it. Useful for outbound HTTP clients that may follow redirects to publicly trusted hosts|`boolean`|`false`
 |insecureSkipHostVerify|When to true in unit test development environments to disable TLS verification. Use with extreme caution|`boolean`|`<nil>`
 |key|The TLS certificate key in PEM format (this option is ignored if keyFile is also set)|`string`|`<nil>`
 |keyFile|The path to the private key file for TLS on this API|`string`|`<nil>`
